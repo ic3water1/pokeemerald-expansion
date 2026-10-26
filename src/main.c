@@ -22,6 +22,7 @@
 #include "text.h"
 #include "intro.h"
 #include "main.h"
+#include "soullink.h"
 #include "trainer_hill.h"
 #include "test_runner.h"
 #include "constants/rgb.h"
@@ -112,6 +113,7 @@ void AgbMain(void)
     ResetBgs();
     SetDefaultFontsPointer();
     InitHeap(gHeap, HEAP_SIZE);
+    SoulLink_Init();
 
     gSoftResetDisabled = FALSE;
 
