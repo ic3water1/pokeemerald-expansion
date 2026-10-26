@@ -34,6 +34,18 @@ typedef uint8_t bool8;
 #define NUM_MAPSECS 213 // Total trackable route/location IDs in Hoenn
 #define PLAYER_NAME_LEN 8
 
+// Graveyard Box: Box 14 (0-indexed 13)
+#define SOULLINK_GRAVEYARD_BOX 13
+
+// Bitmask helper for Pokémon types (supports up to 32 types, covering all 20 types)
+#define SOULLINK_TYPE_BIT(type) ((u32)1 << (type))
+
+// Special Stable Encounter IDs mapped into unused slots of routeState[213]
+#define ENCOUNTER_ID_ROUTE_104_SOUTH 28 // Standard MAPSEC_ROUTE_104
+#define ENCOUNTER_ID_ROUTE_104_NORTH 210
+#define ENCOUNTER_ID_STATIC_BIRCH_STARTER 211
+#define ENCOUNTER_ID_STATIC_CASTFORM 212
+
 // Outgoing Event Types (GBA -> Lua bridge)
 enum SoulLinkEventType {
     SOULLINK_EVENT_NONE = 0,
@@ -56,10 +68,11 @@ enum SoulLinkCommandType {
 
 // Route status in Soul Link matrix
 enum SoulLinkRouteState {
-    ROUTE_STATE_OPEN = 0,
-    ROUTE_STATE_ALIVE = 1,
-    ROUTE_STATE_BOXED = 2,
-    ROUTE_STATE_DEAD_FORFEITED = 3,
+    ROUTE_STATE_OPEN = 0,             // Not yet encountered
+    ROUTE_STATE_ALIVE = 1,            // Caught and currently alive
+    ROUTE_STATE_BOXED = 2,            // Boxed in PC storage
+    ROUTE_STATE_DEAD_FORFEITED = 3,   // Fainted, fled, or encounter forfeited
+    ROUTE_STATE_ENCOUNTER_ACTIVE = 4, // Currently in first encounter battle
 };
 
 struct PlayerSyncInfo {
@@ -88,10 +101,10 @@ struct SoulLinkMailbox {
 
     // Persistent Synced State
     u8 playerCount;                             // 1 to 8
-    u8 unlockedGymStage;                        // Highest gym currently allowed
-    u8 routeState[NUM_MAPSECS];                 // 0 = Open, 1 = Alive, 2 = Boxed, 3 = Dead/Forfeited
+    u8 unlockedGymStage;                        // Highest gym currently allowed (0 to 8)
+    u8 routeState[NUM_MAPSECS];                 // 0 = Open, 1 = Alive, 2 = Boxed, 3 = Dead/Forfeited, 4 = Active
     u16 routeSpecies[NUM_MAPSECS][MAX_PLAYERS]; // Species caught per route per player for Tracker UI
-    u8 routeTypesMask[NUM_MAPSECS];             // Bitmask of primary types used within each route link
+    u32 routeTypesMask[NUM_MAPSECS];            // 32-bit bitmask of primary types used within each route link
     struct PlayerSyncInfo players[MAX_PLAYERS]; // Live status, badges, and current route of all 8 players
 };
 
@@ -100,8 +113,23 @@ extern EWRAM_DATA struct SoulLinkMailbox gSoulLink;
 /* Function Declarations */
 void SoulLink_Init(void);
 void SoulLink_EmitEvent(u8 eventType, u8 mapSec, u16 species, u8 primaryType, u8 slotIndex);
+u16 SoulLink_GetEncounterId(void);
 bool8 SoulLink_CanCatchOnCurrentMap(void);
 u8 SoulLink_GetCurrentLevelCap(void);
 void SoulLink_ProcessOverworldCommands(void);
+
+// Phase 2: Local Nuzlocke Mechanics
+void SoulLink_OnWildBattleStart(void);
+void SoulLink_OnWildCatchSuccess(u16 species);
+void SoulLink_OnWildEncounterFailed(void);
+void SoulLink_QueueFaintedMon(u8 partyIndex);
+void SoulLink_ProcessFaintedMonsPostBattle(void);
+bool8 SoulLink_IsPartyWiped(void);
+u8 SoulLink_GetLivingPokemonCount(void);
+
+// Gym progression
+bool8 CheckPartyGymUnlock(void);
+u8 SoulLink_GetRequiredGymStageForMap(void);
+void SoulLink_OnBadgeEarned(u8 badgeNum);
 
 #endif // GUARD_SOULLINK_H

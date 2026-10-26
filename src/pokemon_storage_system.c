@@ -43,6 +43,7 @@
 #include "constants/moves.h"
 #include "constants/rgb.h"
 #include "constants/songs.h"
+#include "soullink.h"
 #include "constants/pokemon_icon.h"
 #include "chooseboxmon.h"
 #include "party_menu.h"
@@ -1710,8 +1711,15 @@ void ResetPokemonStorageSystem(void)
     }
     for (boxId = 0; boxId < TOTAL_BOXES_COUNT; boxId++)
     {
-        u8 *dest = StringCopy(GetBoxNamePtr(boxId), gText_Box);
-        ConvertIntToDecimalStringN(dest, boxId + 1, STR_CONV_MODE_LEFT_ALIGN, 2);
+        if (boxId == SOULLINK_GRAVEYARD_BOX)
+        {
+            StringCopy(GetBoxNamePtr(boxId), COMPOUND_STRING("GRAVE"));
+        }
+        else
+        {
+            u8 *dest = StringCopy(GetBoxNamePtr(boxId), gText_Box);
+            ConvertIntToDecimalStringN(dest, boxId + 1, STR_CONV_MODE_LEFT_ALIGN, 2);
+        }
     }
 
     for (boxId = 0; boxId < TOTAL_BOXES_COUNT; boxId++)
@@ -2775,6 +2783,13 @@ static void Task_ShiftMon(u8 taskId)
     switch (sStorage->state)
     {
     case 0:
+        if (StorageGetCurrentBox() == SOULLINK_GRAVEYARD_BOX)
+        {
+            PlaySE(SE_BOO);
+            PrintMessage(MSG_CANT_RELEASE_EGG);
+            sStorage->state = 1;
+            break;
+        }
         InitMonPlaceChange(CHANGE_SHIFT);
         sStorage->state++;
         break;
@@ -2793,6 +2808,13 @@ static void Task_WithdrawMon(u8 taskId)
     switch (sStorage->state)
     {
     case 0:
+        if (StorageGetCurrentBox() == SOULLINK_GRAVEYARD_BOX)
+        {
+            PlaySE(SE_BOO);
+            PrintMessage(MSG_CANT_RELEASE_EGG);
+            sStorage->state = 1;
+            break;
+        }
         if (CalculatePlayerPartyCount() == PARTY_SIZE)
         {
             PrintMessage(MSG_PARTY_FULL);

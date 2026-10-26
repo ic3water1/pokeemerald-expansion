@@ -1240,6 +1240,17 @@ Common_EventScript_PlayGymBadgeFanfare::
 	waitfanfare
 	return
 
+Common_EventScript_SoulLinkGymLocked::
+	msgbox Common_Text_SoulLinkGymLocked, MSGBOX_DEFAULT
+	release
+	end
+
+Common_Text_SoulLinkGymLocked:
+	.string "Your SOUL LINK party has not unlocked\n"
+	.string "this GYM LEADER yet!\p"
+	.string "Wait until all connected players defeat\n"
+	.string "the previous GYM LEADER.$"
+
 Common_EventScript_OutOfCenterPartyHeal::
 	fadescreenswapbuffers FADE_TO_BLACK
 	playfanfare MUS_HEAL

@@ -38,6 +38,7 @@
 #include "script.h"
 #include "shop.h"
 #include "sound.h"
+#include "soullink.h"
 #include "sprite.h"
 #include "strings.h"
 #include "string_util.h"
@@ -221,6 +222,7 @@ static const u8 sText_DepositHowManyVar1[] = _("Deposit how many\n{STR_VAR_1}?")
 static const u8 sText_DepositedVar2Var1s[] = _("Deposited {STR_VAR_2}\n{STR_VAR_1}.");
 static const u8 sText_NoRoomForItems[] = _("There's no room to\nstore items.");
 static const u8 sText_CantStoreImportantItems[] = _("Important items\ncan't be stored in\nthe PC!");
+static const u8 sText_SoulLinkCantCatch[] = _("The SOUL LINK prevents\ncatching POKéMON here!");
 
 static void Task_LoadBagSortOptions(u8 taskId);
 static void ItemMenu_SortByName(u8 taskId);
@@ -2107,6 +2109,13 @@ static void ItemMenu_UseInBattle(u8 taskId)
     enum ItemType type = GetItemType(gSpecialVar_ItemId);
     if (!GetItemBattleUsage(gSpecialVar_ItemId))
         return;
+
+    if (GetItemPocket(gSpecialVar_ItemId) == POCKET_POKE_BALLS && !SoulLink_CanCatchOnCurrentMap())
+    {
+        RemoveContextWindow();
+        DisplayItemMessage(taskId, FONT_NORMAL, sText_SoulLinkCantCatch, HandleErrorMessage);
+        return;
+    }
 
     RemoveContextWindow();
     if (type == ITEM_USE_BAG_MENU || (type == ITEM_USE_BATTLER && !IsDoubleBattle()))
