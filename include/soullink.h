@@ -362,6 +362,8 @@ bool8 SoulLink_IsGymStageUnlocked(u8 stage);
 u8 SoulLink_GetRequiredGymStageForMap(void);
 u8 SoulLink_GetBadgeCount(void);
 void SoulLink_OnBadgeEarned(void);
+bool8 SoulLink_IsMultiplayerActive(void);
+bool8 SoulLink_ApplyKillMon(u8 targetMapSec, u16 species);
 
 #if TESTING
 void SoulLink_TestSetNextEventSequenceId(u16 seq);

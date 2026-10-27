@@ -2,6 +2,7 @@
 
 #if __has_include("global.h")
 #include "global.h"
+#include "main.h"
 #include "overworld.h"
 #include "battle.h"
 #include "battle_util.h"
@@ -199,10 +200,14 @@ void SoulLink_LoadFromSaveBlock3(void)
         }
 
         // Synchronize unlocked gym stage with in-game badge count if badges exceed saved stage
-        badges = SoulLink_GetBadgeCount();
-        if (badges > gSoulLink.unlockedGymStage)
+        // In multiplayer, unlockedGymStage is authoritatively controlled by the coordinator
+        if (!SoulLink_IsMultiplayerActive())
         {
-            gSoulLink.unlockedGymStage = badges;
+            badges = SoulLink_GetBadgeCount();
+            if (badges > gSoulLink.unlockedGymStage)
+            {
+                gSoulLink.unlockedGymStage = badges;
+            }
         }
     }
 #endif
@@ -841,14 +846,29 @@ u8 SoulLink_GetBadgeCount(void)
 }
 
 /**
+ * Checks whether an active multiplayer Soul Link session is currently running.
+ * In multiplayer mode, group gym progression is coordinator-authoritative.
+ */
+bool8 SoulLink_IsMultiplayerActive(void)
+{
+    return (gSoulLink.lobbyResponse.runState == SOULLINK_RUN_STATE_IN_PROGRESS
+         || gSoulLink.transportState == SOULLINK_TRANSPORT_CONNECTED);
+}
+
+/**
  * Called when a Gym Badge is earned by the player (script special: SoulLink_OnBadgeEarned).
+ * In multiplayer mode, group gym progression is authoritatively unlocked by the coordinator
+ * via SOULLINK_CMD_UNLOCK_GYM. Do not advance unlockedGymStage locally!
  */
 void SoulLink_OnBadgeEarned(void)
 {
     u8 badges = SoulLink_GetBadgeCount();
-    if (badges > gSoulLink.unlockedGymStage)
+    if (!SoulLink_IsMultiplayerActive())
     {
-        gSoulLink.unlockedGymStage = badges;
+        if (badges > gSoulLink.unlockedGymStage)
+        {
+            gSoulLink.unlockedGymStage = badges;
+        }
     }
     SoulLink_SaveToSaveBlock3();
     SoulLink_EmitEvent(SOULLINK_EVENT_BADGE, gMapHeader.regionMapSectionId, 0, 0, badges);
@@ -983,6 +1003,116 @@ static bool8 IsCommandSequenceDuplicateOrStale(u16 cmdSeq, u16 lastExecuted)
 }
 
 /**
+ * Real ROM enforcement for SOULLINK_CMD_KILL_MON.
+ * Identifies the linked Pokémon by stored encounter/link identity across party and PC storage,
+ * permanently sets its HP to 0, moves it to the Graveyard box (Box 14), zeroes the source slot,
+ * and compacts party slots. Idempotent: safe to execute multiple times without unintended mutations.
+ */
+bool8 SoulLink_ApplyKillMon(u8 targetMapSec, u16 species)
+{
+#if __has_include("global.h")
+    s32 i;
+    bool8 anyPartyMoved = FALSE;
+
+    if (targetMapSec >= NUM_MAPSECS)
+        return FALSE;
+
+    // 1. Search player party for Pokémon encountered on targetMapSec
+    for (i = (s32)PARTY_SIZE - 1; i >= 0; i--)
+    {
+        struct Pokemon *mon = &gParties[B_TRAINER_PLAYER][i];
+        u16 monSpecies = GetMonData(mon, MON_DATA_SPECIES);
+        if (monSpecies == SPECIES_NONE || GetMonData(mon, MON_DATA_IS_EGG))
+            continue;
+
+        u16 encounterId = SoulLink_GetEncounterIdForMon(mon);
+        if (encounterId == targetMapSec)
+        {
+            u16 zeroHp = 0;
+            SetMonData(mon, MON_DATA_HP, &zeroHp);
+
+            if (gPokemonStoragePtr != NULL)
+            {
+                s16 freeSpot = GetFirstFreeBoxSpot(SOULLINK_GRAVEYARD_BOX);
+                if (freeSpot != -1)
+                {
+                    SetBoxMonAt(SOULLINK_GRAVEYARD_BOX, freeSpot, &mon->box);
+                    ZeroMonData(mon);
+                    anyPartyMoved = TRUE;
+                }
+            }
+        }
+    }
+
+    if (anyPartyMoved)
+    {
+        CompactPartySlots();
+    }
+
+    // 2. Search PC storage boxes (excluding Graveyard box)
+    if (gPokemonStoragePtr != NULL)
+    {
+        s32 boxId, boxPos;
+        for (boxId = 0; boxId < TOTAL_BOXES_COUNT; boxId++)
+        {
+            if (boxId == SOULLINK_GRAVEYARD_BOX)
+                continue;
+
+            for (boxPos = 0; boxPos < IN_BOX_COUNT; boxPos++)
+            {
+                u16 boxSpecies = GetBoxMonDataAt(boxId, boxPos, MON_DATA_SPECIES);
+                if (boxSpecies == SPECIES_NONE || GetBoxMonDataAt(boxId, boxPos, MON_DATA_IS_EGG))
+                    continue;
+
+                u8 metLoc = (u8)GetBoxMonDataAt(boxId, boxPos, MON_DATA_MET_LOCATION);
+                if (metLoc == targetMapSec)
+                {
+                    struct BoxPokemon *boxMon = GetBoxedMonPtr(boxId, boxPos);
+                    s16 freeSpot = GetFirstFreeBoxSpot(SOULLINK_GRAVEYARD_BOX);
+                    if (freeSpot != -1)
+                    {
+                        SetBoxMonAt(SOULLINK_GRAVEYARD_BOX, freeSpot, boxMon);
+                        ZeroBoxMonAt(boxId, boxPos);
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Mark route state as dead and persist to SaveBlock3
+    gSoulLink.routeState[targetMapSec] = ROUTE_STATE_DEAD_FORFEITED;
+    SoulLink_SaveToSaveBlock3();
+
+    // 4. Check if party is completely wiped of living Pokémon
+    if (SoulLink_IsPartyWiped())
+    {
+        if (SoulLink_GetLivingBoxPokemonCount() > 0)
+        {
+#if !TESTING
+            SetMainCallback2(CB2_WhiteOut);
+#endif
+        }
+        else
+        {
+            SoulLink_EmitEvent(SOULLINK_EVENT_WIPE, targetMapSec, 0, 0, 0);
+#if !TESTING
+            SetMainCallback2(CB2_WhiteOut);
+#endif
+        }
+    }
+
+    return TRUE;
+#else
+    if (targetMapSec < NUM_MAPSECS)
+    {
+        gSoulLink.routeState[targetMapSec] = ROUTE_STATE_DEAD_FORFEITED;
+        return TRUE;
+    }
+    return FALSE;
+#endif
+}
+
+/**
  * Safe overworld command dispatcher. Called during CB2_Overworld when ScriptContext is idle.
  * Processes incoming synchronized events (linked deaths, route locks, gym unlocks, party wipes).
  * DEFERRED EXECUTION: If not in a genuinely safe overworld state, execution is postponed.
@@ -1011,6 +1141,17 @@ void SoulLink_ProcessOverworldCommands(void)
         switch (cmd->cmdType)
         {
         case SOULLINK_CMD_KILL_MON:
+            if (cmd->targetMapSec >= NUM_MAPSECS)
+            {
+                cmd->executionStatus = SOULLINK_CMD_STATUS_REJECTED;
+            }
+            else
+            {
+                SoulLink_ApplyKillMon((u8)cmd->targetMapSec, cmd->paramValue);
+                cmd->executionStatus = SOULLINK_CMD_STATUS_SUCCESS;
+            }
+            break;
+
         case SOULLINK_CMD_LOCK_ROUTE:
             if (cmd->targetMapSec >= NUM_MAPSECS)
             {
@@ -1019,6 +1160,7 @@ void SoulLink_ProcessOverworldCommands(void)
             else
             {
                 gSoulLink.routeState[cmd->targetMapSec] = ROUTE_STATE_DEAD_FORFEITED;
+                SoulLink_SaveToSaveBlock3();
                 cmd->executionStatus = SOULLINK_CMD_STATUS_SUCCESS;
             }
             break;
