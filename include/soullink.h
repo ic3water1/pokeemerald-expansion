@@ -369,6 +369,7 @@ u8 SoulLink_ApplyKillMon(u8 targetMapSec, u16 species);
 void SoulLink_TestSetNextEventSequenceId(u16 seq);
 void SoulLink_TestSetSessionEpoch(u32 epoch);
 void SoulLink_TestSetSafeOverworldOverride(bool8 enable, bool8 isSafe);
+void SoulLink_TestSetLastExecutedCmdSequenceId(u16 seq);
 #endif
 
 #endif // GUARD_SOULLINK_H
