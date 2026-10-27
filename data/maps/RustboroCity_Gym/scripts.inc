@@ -2,6 +2,8 @@ RustboroCity_Gym_MapScripts::
 	.byte 0
 
 RustboroCity_Gym_EventScript_Roxanne::
+	specialvar VAR_RESULT, CheckPartyGymUnlock
+	goto_if_eq VAR_RESULT, FALSE, Common_EventScript_SoulLinkGymLocked
 	trainerbattle_single TRAINER_ROXANNE_1, RustboroCity_Gym_Text_RoxanneIntro, RustboroCity_Gym_Text_RoxanneDefeat, RustboroCity_Gym_EventScript_RoxanneDefeated, NO_MUSIC
 	specialvar VAR_RESULT, ShouldTryRematchBattle
 	goto_if_eq VAR_RESULT, TRUE, RustboroCity_Gym_EventScript_RoxanneRematch
@@ -17,6 +19,7 @@ RustboroCity_Gym_EventScript_RoxanneDefeated::
 	msgbox RustboroCity_Gym_Text_StoneBadgeInfoTakeThis, MSGBOX_DEFAULT
 	setflag FLAG_DEFEATED_RUSTBORO_GYM
 	setflag FLAG_BADGE01_GET
+	special SoulLink_OnBadgeEarned
 	setvar VAR_RUSTBORO_CITY_STATE, 1
 	addvar VAR_PETALBURG_GYM_STATE, 1
 	setvar VAR_0x8008, 1

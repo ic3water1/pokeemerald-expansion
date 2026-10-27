@@ -43,6 +43,7 @@
 #include "decoration_inventory.h"
 #include "secret_base.h"
 #include "string_util.h"
+#include "soullink.h"
 #include "player_pc.h"
 #include "field_specials.h"
 #include "berry_powder.h"
@@ -177,6 +178,7 @@ void NewGameInitData(void)
     ClearFrontierRecord();
     ClearSav1();
     ClearSav3();
+    SoulLink_NewGame();
     ClearAllMail();
     gSaveBlock2Ptr->specialSaveWarpFlags = 0;
     gSaveBlock2Ptr->gcnLinkFlags = 0;

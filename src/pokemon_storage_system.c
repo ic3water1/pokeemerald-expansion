@@ -43,6 +43,7 @@
 #include "constants/moves.h"
 #include "constants/rgb.h"
 #include "constants/songs.h"
+#include "soullink.h"
 #include "constants/pokemon_icon.h"
 #include "chooseboxmon.h"
 #include "party_menu.h"
@@ -671,7 +672,7 @@ static void MultiMove_Free(void);
 static bool8 MultiMove_Init(void);
 static bool8 MultiMove_RunFunction(void);
 static bool8 MultiMove_TryMoveGroup(u8);
-static bool8 MultiMove_CanPlaceSelection(void);
+bool8 MultiMove_CanPlaceSelection(void);
 static void MultiMove_SetFunction(u8);
 static u8 MultiMove_GetOrigin(void);
 static bool8 MultiMove_Start(void);
@@ -688,7 +689,11 @@ static void MultiMove_InitMove(u16, u16, u16);
 static void MultiMove_GetMonsFromSelection(void);
 static void MultiMove_RemoveMonsFromBox(void);
 static void MultiMove_CreatePlacedMonIcons(void);
+#if TESTING
+void MultiMove_SetPlacedMonData(void);
+#else
 static void MultiMove_SetPlacedMonData(void);
+#endif
 static u8 MultiMove_UpdateMove(void);
 static void MultiMove_DeselectRow(u8, u8, u8);
 static void MultiMove_SelectRow(u8, u8, u8);
@@ -798,7 +803,7 @@ static void Task_InitBox(u8);
 static void SetUpScrollToBox(u8);
 static bool8 ScrollToBox(void);
 static s8 DetermineBoxScrollDirection(u8);
-static void SetCurrentBox(u8);
+void SetCurrentBox(u8);
 static struct BoxPokemon *GetCursorBoxMon(void);
 
 // Misc
@@ -1561,7 +1566,7 @@ static void Task_PCMainMenu(u8 taskId)
                 AddTextPrinterParameterized2(0, FONT_NORMAL, gText_PartyFull, 0, NULL, TEXT_COLOR_DARK_GRAY, TEXT_COLOR_WHITE, TEXT_COLOR_LIGHT_GRAY);
                 task->tState = STATE_ERROR_MSG;
             }
-            else if (task->tInput == OPTION_DEPOSIT && CountPartyMons() == 1)
+            else if (task->tInput == OPTION_DEPOSIT && CountPartyMons() <= 1)
             {
                 // Can't deposit
                 FillWindowPixelBuffer(0, PIXEL_FILL(1));
@@ -1710,8 +1715,15 @@ void ResetPokemonStorageSystem(void)
     }
     for (boxId = 0; boxId < TOTAL_BOXES_COUNT; boxId++)
     {
-        u8 *dest = StringCopy(GetBoxNamePtr(boxId), gText_Box);
-        ConvertIntToDecimalStringN(dest, boxId + 1, STR_CONV_MODE_LEFT_ALIGN, 2);
+        if (boxId == SOULLINK_GRAVEYARD_BOX)
+        {
+            StringCopy(GetBoxNamePtr(boxId), COMPOUND_STRING("GRAVE"));
+        }
+        else
+        {
+            u8 *dest = StringCopy(GetBoxNamePtr(boxId), gText_Box);
+            ConvertIntToDecimalStringN(dest, boxId + 1, STR_CONV_MODE_LEFT_ALIGN, 2);
+        }
     }
 
     for (boxId = 0; boxId < TOTAL_BOXES_COUNT; boxId++)
@@ -2775,6 +2787,13 @@ static void Task_ShiftMon(u8 taskId)
     switch (sStorage->state)
     {
     case 0:
+        if (StorageGetCurrentBox() == SOULLINK_GRAVEYARD_BOX)
+        {
+            PlaySE(SE_BOO);
+            PrintMessage(MSG_CANT_RELEASE_EGG);
+            sStorage->state = 1;
+            break;
+        }
         InitMonPlaceChange(CHANGE_SHIFT);
         sStorage->state++;
         break;
@@ -2793,6 +2812,13 @@ static void Task_WithdrawMon(u8 taskId)
     switch (sStorage->state)
     {
     case 0:
+        if (StorageGetCurrentBox() == SOULLINK_GRAVEYARD_BOX)
+        {
+            PlaySE(SE_BOO);
+            PrintMessage(MSG_CANT_RELEASE_EGG);
+            sStorage->state = 1;
+            break;
+        }
         if (CalculatePlayerPartyCount() == PARTY_SIZE)
         {
             PrintMessage(MSG_PARTY_FULL);
@@ -2865,6 +2891,13 @@ static void Task_DepositMenu(u8 taskId)
             SetPokeStorageTask(Task_PokeStorageMain);
             break;
         default:
+            if (boxId == SOULLINK_GRAVEYARD_BOX)
+            {
+                PlaySE(SE_BOO);
+                PrintMessage(MSG_BOX_IS_FULL);
+                sStorage->state = 4;
+                break;
+            }
             if (TryStorePartyMonInBox(boxId))
             {
                 sDepositBoxId = boxId;
@@ -6153,6 +6186,8 @@ static void DoCursorNewPosUpdate(void)
         SetMovingMonPriority(1);
         break;
     case CURSOR_AREA_IN_BOX:
+        if (StorageGetCurrentBox() == SOULLINK_GRAVEYARD_BOX)
+            return;
         if (sStorage->inBoxMovingMode == MOVE_MODE_NORMAL)
         {
             sStorage->cursorSprite->oam.priority = 1;
@@ -6386,6 +6421,8 @@ static void MoveMon(void)
         SetMovingMonSprite(MODE_PARTY, sCursorPosition);
         break;
     case CURSOR_AREA_IN_BOX:
+        if (StorageGetCurrentBox() == SOULLINK_GRAVEYARD_BOX)
+            return;
         if (sStorage->inBoxMovingMode == MOVE_MODE_NORMAL)
         {
             SetMovingMonData(StorageGetCurrentBox(), sCursorPosition);
@@ -6814,7 +6851,7 @@ static void InitSummaryScreenData(void)
     {
         sStorage->summaryMon.mon = gParties[B_TRAINER_PLAYER];
         sStorage->summaryStartPos = sCursorPosition;
-        sStorage->summaryMaxPos = CountPartyMons() - 1;
+        sStorage->summaryMaxPos = (CountPartyMons() > 0) ? CountPartyMons() - 1 : 0;
         sStorage->summaryScreenMode = SUMMARY_MODE_NORMAL;
     }
     else
@@ -6890,7 +6927,11 @@ static bool8 CanPlaceMon(void)
         if (sCursorArea == CURSOR_AREA_IN_PARTY && GetMonData(&gParties[B_TRAINER_PLAYER][sCursorPosition], MON_DATA_SPECIES) == SPECIES_NONE)
             return TRUE;
         else if (sCursorArea == CURSOR_AREA_IN_BOX && GetBoxMonDataAt(StorageGetCurrentBox(), sCursorPosition, MON_DATA_SPECIES_OR_EGG) == SPECIES_NONE)
+        {
+            if (StorageGetCurrentBox() == SOULLINK_GRAVEYARD_BOX)
+                return FALSE;
             return TRUE;
+        }
         else
             return FALSE;
     }
@@ -6901,6 +6942,8 @@ static bool8 CanShiftMon(void)
 {
     if (sIsMonBeingMoved)
     {
+        if (sCursorArea == CURSOR_AREA_IN_BOX && StorageGetCurrentBox() == SOULLINK_GRAVEYARD_BOX)
+            return FALSE;
         if (sCursorArea == CURSOR_AREA_IN_PARTY && CountPartyAliveNonEggMonsExcept(sCursorPosition) == 0)
         {
             if (sStorage->displayMonIsEgg || GetMonData(&sStorage->movingMon, MON_DATA_HP) == 0)
@@ -7253,6 +7296,8 @@ static u8 InBoxInput_Normal(void)
             }
             else
             {
+                if (StorageGetCurrentBox() == SOULLINK_GRAVEYARD_BOX)
+                    return INPUT_NONE;
                 sStorage->inBoxMovingMode = MOVE_MODE_MULTIPLE_SELECTING;
                 return INPUT_MULTIMOVE_START;
             }
@@ -8381,6 +8426,9 @@ static bool8 MultiMove_GrabSelection(void)
 {
     bool8 movingBg, movingMon;
 
+    if (StorageGetCurrentBox() == SOULLINK_GRAVEYARD_BOX)
+        return FALSE;
+
     switch (sMultiMove->state)
     {
     case 0:
@@ -8702,13 +8750,26 @@ static void MultiMove_CreatePlacedMonIcons(void)
     }
 }
 
+#if TESTING
+void MultiMove_SetPlacedMonData(void)
+#else
 static void MultiMove_SetPlacedMonData(void)
+#endif
 {
     s32 i, j;
-    s32 columnCount = sMultiMove->minColumn + sMultiMove->columnsTotal;
-    s32 rowCount = sMultiMove->minRow + sMultiMove->rowsTotal;
+    s32 columnCount;
+    s32 rowCount;
     u8 boxId = StorageGetCurrentBox();
     u8 monArrayId = 0;
+
+    if (boxId == SOULLINK_GRAVEYARD_BOX)
+        return;
+
+    if (sMultiMove == NULL)
+        return;
+
+    columnCount = sMultiMove->minColumn + sMultiMove->columnsTotal;
+    rowCount = sMultiMove->minRow + sMultiMove->rowsTotal;
 
     for (i = sMultiMove->minRow; i < rowCount; i++)
     {
@@ -8740,12 +8801,21 @@ static u8 MultiMove_GetOrigin(void)
     return (IN_BOX_COLUMNS * sMultiMove->fromRow) + sMultiMove->fromColumn;
 }
 
-static bool8 MultiMove_CanPlaceSelection(void)
+bool8 MultiMove_CanPlaceSelection(void)
 {
     s32 i, j;
-    s32 columnCount = sMultiMove->minColumn + sMultiMove->columnsTotal;
-    s32 rowCount = sMultiMove->minRow + sMultiMove->rowsTotal;
+    s32 columnCount;
+    s32 rowCount;
     u8 monArrayId = 0;
+
+    if (StorageGetCurrentBox() == SOULLINK_GRAVEYARD_BOX)
+        return FALSE;
+
+    if (sMultiMove == NULL)
+        return FALSE;
+
+    columnCount = sMultiMove->minColumn + sMultiMove->columnsTotal;
+    rowCount = sMultiMove->minRow + sMultiMove->rowsTotal;
 
     for (i = sMultiMove->minRow; i < rowCount; i++)
     {
@@ -8763,6 +8833,31 @@ static bool8 MultiMove_CanPlaceSelection(void)
     return TRUE;
 }
 
+#if TESTING
+void Test_SetupMultiMoveSelection(u8 minCol, u8 minRow, u8 cols, u8 rows, struct BoxPokemon *mon1, struct BoxPokemon *mon2)
+{
+    if (sMultiMove == NULL)
+        sMultiMove = AllocZeroed(sizeof(*sMultiMove));
+
+    sMultiMove->minColumn = minCol;
+    sMultiMove->minRow = minRow;
+    sMultiMove->columnsTotal = cols;
+    sMultiMove->rowsTotal = rows;
+    if (mon1 != NULL)
+        sMultiMove->boxMons[0] = *mon1;
+    if (mon2 != NULL)
+        sMultiMove->boxMons[1] = *mon2;
+}
+
+void Test_TeardownMultiMove(void)
+{
+    if (sMultiMove != NULL)
+    {
+        Free(sMultiMove);
+        sMultiMove = NULL;
+    }
+}
+#endif
 
 //------------------------------------------------------------------------------
 //  SECTION: Item mode
@@ -9529,7 +9624,7 @@ u8 StorageGetCurrentBox(void)
     return gPokemonStoragePtr->currentBox;
 }
 
-static void SetCurrentBox(u8 boxId)
+void SetCurrentBox(u8 boxId)
 {
     if (boxId < TOTAL_BOXES_COUNT)
         gPokemonStoragePtr->currentBox = boxId;

@@ -20,6 +20,7 @@
 #include "pokedex.h"
 #include "pokemon.h"
 #include "pokemon_storage_system.h"
+#include "soullink.h"
 #include "random.h"
 #include "random_mon_generation.h"
 #include "script.h"
@@ -55,6 +56,9 @@ static void HealPlayerBoxes(void)
 
     for (boxId = 0; boxId < TOTAL_BOXES_COUNT; boxId++)
     {
+        if (boxId == SOULLINK_GRAVEYARD_BOX)
+            continue;
+
         for (boxPosition = 0; boxPosition < IN_BOX_COUNT; boxPosition++)
         {
             boxMon = &gPokemonStoragePtr->boxes[boxId][boxPosition];

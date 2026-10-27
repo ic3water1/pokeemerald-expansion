@@ -28,6 +28,7 @@
 #include "constants/heal_locations.h"
 #include "constants/rgb.h"
 #include "constants/weather.h"
+#include "soullink.h"
 
 /*
  *  This file handles region maps generally, and the map used when selecting a fly destination.
@@ -1871,6 +1872,18 @@ u8 *GetMapName(u8 *dest, mapsec_u16_t regionMapId, u16 padLength)
     if (regionMapId == MAPSEC_SECRET_BASE)
     {
         str = GetSecretBaseMapName(dest);
+    }
+    else if (regionMapId == ENCOUNTER_ID_ROUTE_104_NORTH)
+    {
+        str = StringCopy(dest, gRegionMapEntries[MAPSEC_ROUTE_104].name);
+    }
+    else if (regionMapId == ENCOUNTER_ID_STATIC_BIRCH_STARTER)
+    {
+        str = StringCopy(dest, gRegionMapEntries[MAPSEC_LITTLEROOT_TOWN].name);
+    }
+    else if (regionMapId == ENCOUNTER_ID_STATIC_CASTFORM)
+    {
+        str = StringCopy(dest, gRegionMapEntries[MAPSEC_ROUTE_119].name);
     }
     else if (regionMapId < MAPSEC_NONE)
     {

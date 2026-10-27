@@ -38,6 +38,7 @@
 #include "pokedex.h"
 #include "pokeblock.h"
 #include "pokemon.h"
+#include "soullink.h"
 #include "pokemon_animation.h"
 #include "pokemon_icon.h"
 #include "pokemon_summary_screen.h"
@@ -2941,6 +2942,28 @@ void CopyMon(void *dest, void *src, size_t size)
 u8 GiveCapturedMonToPlayer(struct Pokemon *mon)
 {
     s32 i;
+    u8 encounterId;
+
+    // Check Soul Link rules: if catches are not permitted on this map, reject from party!
+    if (!SoulLink_CanCatchOnCurrentMap())
+    {
+        // Invalid catch: Divert to Graveyard box as forfeited / dead so it can NEVER enter the usable party
+        if (gPokemonStoragePtr != NULL)
+        {
+            s16 freeSpot = GetFirstFreeBoxSpot(SOULLINK_GRAVEYARD_BOX);
+            if (freeSpot != -1)
+            {
+                u16 zeroHp = 0;
+                SetMonData(mon, MON_DATA_HP, &zeroHp);
+                SetBoxMonAt(SOULLINK_GRAVEYARD_BOX, freeSpot, &mon->box);
+            }
+        }
+        return MON_CANT_GIVE;
+    }
+
+    // Set stable per-Pokémon encounter identity
+    encounterId = (u8)SoulLink_GetEncounterId();
+    SetMonData(mon, MON_DATA_MET_LOCATION, &encounterId);
 
     SetMonData(mon, MON_DATA_OT_NAME, gSaveBlock2Ptr->playerName);
     SetMonData(mon, MON_DATA_OT_GENDER, &gSaveBlock2Ptr->playerGender);
@@ -2970,6 +2993,15 @@ u8 CopyMonToPC(struct Pokemon *mon)
 
     do
     {
+        // Never store living Pokémon into the Graveyard box
+        if (boxNo == SOULLINK_GRAVEYARD_BOX)
+        {
+            boxNo++;
+            if (boxNo == TOTAL_BOXES_COUNT)
+                boxNo = 0;
+            continue;
+        }
+
         for (boxPos = 0; boxPos < IN_BOX_COUNT; boxPos++)
         {
             struct BoxPokemon *checkingMon = GetBoxedMonPtr(boxNo, boxPos);

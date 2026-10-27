@@ -48,6 +48,7 @@
 #include "tv.h"
 #include "overworld.h"
 #include "vs_seeker.h"
+#include "soullink.h"
 #include "wild_encounter_ow.h"
 #include "window.h"
 #include "constants/battle_frontier.h"
@@ -411,6 +412,7 @@ static void DoStandardWildBattle(bool32 isDouble)
         gBattleTypeFlags |= BATTLE_TYPE_PYRAMID;
     }
     CreateBattleStartTask(GetWildBattleTransition(), 0);
+    SoulLink_OnWildBattleStart();
     IncrementGameStat(GAME_STAT_TOTAL_BATTLES);
     IncrementGameStat(GAME_STAT_WILD_BATTLES);
     IncrementDailyWildBattles();
@@ -444,6 +446,7 @@ void BattleSetup_StartRoamerBattle(void)
     gMain.savedCallback = CB2_EndWildBattle;
     gBattleTypeFlags = BATTLE_TYPE_ROAMER;
     CreateBattleStartTask(GetWildBattleTransition(), 0);
+    SoulLink_OnWildBattleStart();
     IncrementGameStat(GAME_STAT_TOTAL_BATTLES);
     IncrementGameStat(GAME_STAT_WILD_BATTLES);
     IncrementDailyWildBattles();
@@ -481,6 +484,7 @@ static void DoBattlePikeWildBattle(void)
     gMain.savedCallback = CB2_EndWildBattle;
     gBattleTypeFlags = BATTLE_TYPE_PIKE;
     CreateBattleStartTask(GetWildBattleTransition(), 0);
+    SoulLink_OnWildBattleStart();
     IncrementGameStat(GAME_STAT_TOTAL_BATTLES);
     IncrementGameStat(GAME_STAT_WILD_BATTLES);
     IncrementDailyWildBattles();
@@ -535,6 +539,7 @@ void BattleSetup_StartScriptedWildBattle(void)
     gMain.savedCallback = CB2_EndScriptedWildBattle;
     gBattleTypeFlags = 0;
     CreateBattleStartTask(GetWildBattleTransition(), 0);
+    SoulLink_OnWildBattleStart();
     IncrementGameStat(GAME_STAT_TOTAL_BATTLES);
     IncrementGameStat(GAME_STAT_WILD_BATTLES);
     IncrementDailyWildBattles();
@@ -547,6 +552,7 @@ void BattleSetup_StartScriptedDoubleWildBattle(void)
     gMain.savedCallback = CB2_EndScriptedWildBattle;
     gBattleTypeFlags = BATTLE_TYPE_DOUBLE;
     CreateBattleStartTask(GetWildBattleTransition(), 0);
+    SoulLink_OnWildBattleStart();
     IncrementGameStat(GAME_STAT_TOTAL_BATTLES);
     IncrementGameStat(GAME_STAT_WILD_BATTLES);
     IncrementDailyWildBattles();
@@ -578,6 +584,7 @@ void BattleSetup_StartLatiBattle(void)
     gMain.savedCallback = CB2_EndScriptedWildBattle;
     gBattleTypeFlags = BATTLE_TYPE_LEGENDARY;
     CreateBattleStartTask(GetWildBattleTransition(), 0);
+    SoulLink_OnWildBattleStart();
     IncrementGameStat(GAME_STAT_TOTAL_BATTLES);
     IncrementGameStat(GAME_STAT_WILD_BATTLES);
     IncrementDailyWildBattles();
@@ -696,11 +703,21 @@ static void CB2_EndWildBattle(void)
 
     if (IsNPCFollowerWildBattle())
     {
-        RestorePartyAfterFollowerNPCBattle();
-        if (FNPC_FLAG_HEAL_AFTER_FOLLOWER_BATTLE != 0
-         && (FNPC_FLAG_HEAL_AFTER_FOLLOWER_BATTLE == FNPC_ALWAYS
-         || FlagGet(FNPC_FLAG_HEAL_AFTER_FOLLOWER_BATTLE)))
-            HealPlayerParty();
+        SoulLink_HandleFollowerBattlePartyEnd();
+    }
+    else
+    {
+        SoulLink_ProcessFaintedMonsPostBattle();
+    }
+
+    if (gBattleOutcome == B_OUTCOME_CAUGHT)
+    {
+        u16 caughtSpecies = GetMonData(&gParties[B_TRAINER_OPPONENT_A][0], MON_DATA_SPECIES);
+        SoulLink_OnWildCatchSuccess(caughtSpecies);
+    }
+    else if (!IsPlayerDefeated(gBattleOutcome))
+    {
+        SoulLink_OnWildEncounterFailed();
     }
 
     if (IsPlayerDefeated(gBattleOutcome) == TRUE && CurrentBattlePyramidLocation() == PYRAMID_LOCATION_NONE && !InBattlePike())
@@ -719,6 +736,18 @@ static void CB2_EndScriptedWildBattle(void)
 {
     CpuFill16(0, (void *)(BG_PLTT), BG_PLTT_SIZE);
     ResetOamRange(0, 128);
+
+    if (gBattleOutcome == B_OUTCOME_CAUGHT)
+    {
+        u16 caughtSpecies = GetMonData(&gParties[B_TRAINER_OPPONENT_A][0], MON_DATA_SPECIES);
+        SoulLink_OnWildCatchSuccess(caughtSpecies);
+    }
+    else if (!IsPlayerDefeated(gBattleOutcome))
+    {
+        SoulLink_OnWildEncounterFailed();
+    }
+
+    SoulLink_ProcessFaintedMonsPostBattle();
 
     if (IsPlayerDefeated(gBattleOutcome) == TRUE)
     {
@@ -1041,6 +1070,7 @@ static void CB2_EndFirstBattle(void)
 {
     Overworld_ClearSavedMusic();
     DowngradeBadPoison();
+    SoulLink_ClearFaintEvents();
     SetMainCallback2(CB2_ReturnToFieldContinueScriptPlayMapMusic);
 }
 
@@ -1576,11 +1606,11 @@ static void CB2_EndTrainerBattle(void)
     gIsDebugBattle = FALSE;
     if (FollowerNPCIsBattlePartner())
     {
-        RestorePartyAfterFollowerNPCBattle();
-        if (FNPC_FLAG_HEAL_AFTER_FOLLOWER_BATTLE != 0
-         && (FNPC_FLAG_HEAL_AFTER_FOLLOWER_BATTLE == FNPC_ALWAYS
-         || FlagGet(FNPC_FLAG_HEAL_AFTER_FOLLOWER_BATTLE)))
-            HealPlayerParty();
+        SoulLink_HandleFollowerBattlePartyEnd();
+    }
+    else
+    {
+        SoulLink_ProcessFaintedMonsPostBattle();
     }
 
     if (TRAINER_BATTLE_PARAM.earlyRival)
@@ -1632,6 +1662,7 @@ static void CB2_EndTrainerBattle(void)
 
 static void CB2_EndRematchBattle(void)
 {
+    SoulLink_ProcessFaintedMonsPostBattle();
     if (TRAINER_BATTLE_PARAM.opponentA == TRAINER_SECRET_BASE)
     {
         DowngradeBadPoison();

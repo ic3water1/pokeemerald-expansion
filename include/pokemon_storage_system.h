@@ -39,6 +39,13 @@ void ShowPokemonStorageSystemPC(void);
 void ResetPokemonStorageSystem(void);
 s16 CompactPartySlots(void);
 u8 StorageGetCurrentBox(void);
+void SetCurrentBox(u8 boxId);
+bool8 MultiMove_CanPlaceSelection(void);
+#if TESTING
+void MultiMove_SetPlacedMonData(void);
+void Test_SetupMultiMoveSelection(u8 minCol, u8 minRow, u8 cols, u8 rows, struct BoxPokemon *mon1, struct BoxPokemon *mon2);
+void Test_TeardownMultiMove(void);
+#endif
 u32 GetBoxMonDataAt(u8 boxId, u8 boxPosition, s32 request);
 void SetBoxMonDataAt(u8 boxId, u8 boxPosition, s32 request, const void *value);
 u32 GetCurrentBoxMonData(u8 boxPosition, s32 request);
