@@ -379,7 +379,9 @@ void SoulLink_EmitEvent(u8 eventType, u8 mapSec, u16 species, u8 primaryType, u8
 
     if (eventType == SOULLINK_EVENT_FAINTED
      || eventType == SOULLINK_EVENT_MISSED
-     || eventType == SOULLINK_EVENT_WIPE)
+     || eventType == SOULLINK_EVENT_WIPE
+     || eventType == SOULLINK_EVENT_CAUGHT
+     || eventType == SOULLINK_EVENT_BADGE)
     {
         flags |= SOULLINK_EVT_FLAG_CRITICAL;
     }
@@ -923,8 +925,10 @@ bool8 SoulLink_IsSafeOverworldState(void)
 #endif
 
 #if __has_include("global.h")
-    if (gBattleTypeFlags != 0)
-        return FALSE;
+    // Note: gBattleTypeFlags is intentionally NOT checked here because the game engine
+    // retains trainer battle flags even after safely returning to the overworld.
+    // The true runtime overworld state is verified by ensuring the active main callback
+    // is CB2_Overworld, without screen fades, active scripts, or locked controls.
     if (gMain.callback2 != CB2_Overworld)
         return FALSE;
     if (gPaletteFade.active)
@@ -937,6 +941,45 @@ bool8 SoulLink_IsSafeOverworldState(void)
 #else
     return TRUE;
 #endif
+}
+
+/**
+ * Checks whether an incoming command sequence is duplicate or stale relative to lastExecuted.
+ * Uses modular arithmetic over the non-zero sequence space [1, 65535] (modulus 65535).
+ * Returns TRUE if cmdSeq is duplicate or stale, FALSE if fresh.
+ */
+static bool8 IsCommandSequenceDuplicateOrStale(u16 cmdSeq, u16 lastExecuted)
+{
+    u32 diff;
+
+    if (cmdSeq == 0)
+    {
+        return TRUE; // 0 is unassigned/invalid
+    }
+
+    if (lastExecuted == 0)
+    {
+        return FALSE; // Fresh first command of the session
+    }
+
+    if (cmdSeq == lastExecuted)
+    {
+        return TRUE; // Exact duplicate
+    }
+
+    // Sequence numbers skip 0 on wraparound, operating over the space [1, 65535] (modulus 65535).
+    // Calculate forward modular distance from lastExecuted to cmdSeq.
+    diff = (cmdSeq >= lastExecuted)
+         ? (u32)(cmdSeq - lastExecuted)
+         : (u32)(cmdSeq + 65535 - lastExecuted);
+
+    // If forward distance > 32767, cmdSeq lies in the past half-space (stale)
+    if (diff > 32767)
+    {
+        return TRUE;
+    }
+
+    return FALSE; // Fresh forward sequence
 }
 
 /**
@@ -957,8 +1000,8 @@ void SoulLink_ProcessOverworldCommands(void)
         u16 slot = gSoulLink.cmdTail & SOULLINK_QUEUE_MASK;
         struct SoulLinkCommand *cmd = &gSoulLink.cmdQueue[slot];
 
-        // Replay & Duplicate Protection
-        if (cmd->sequenceId != 0 && cmd->sequenceId <= gSoulLink.lastExecutedCmdSequenceId)
+        // Wrap-safe Replay & Duplicate Protection
+        if (IsCommandSequenceDuplicateOrStale(cmd->sequenceId, gSoulLink.lastExecutedCmdSequenceId))
         {
             cmd->executionStatus = SOULLINK_CMD_STATUS_DUPLICATE;
             gSoulLink.cmdTail++;
@@ -1081,18 +1124,27 @@ static bool8 IsValidRoomCode(const u8 *code)
         return FALSE;
     }
 
-    for (i = 0; i < SOULLINK_ROOM_CODE_LEN; i++)
+    // Room codes must fit within SOULLINK_ROOM_CODE_LEN (8 bytes) with a null terminator.
+    // Length must be strictly between 1 and SOULLINK_ROOM_CODE_LEN - 1 (1 to 7 alphanumeric characters).
+    for (i = 0; i < SOULLINK_ROOM_CODE_LEN - 1; i++)
     {
         u8 c = code[i];
         if (c == 0)
         {
-            return (i > 0); // valid if at least 1 character before null
+            return (i > 0);
         }
         if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')))
         {
-            return FALSE; // invalid character
+            return FALSE; // Invalid character
         }
     }
+
+    // If all previous characters were valid non-zero, index (SOULLINK_ROOM_CODE_LEN - 1) MUST be null
+    if (code[SOULLINK_ROOM_CODE_LEN - 1] != 0)
+    {
+        return FALSE; // String cannot fit without truncation; reject
+    }
+
     return TRUE;
 }
 
