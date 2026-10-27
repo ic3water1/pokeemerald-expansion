@@ -172,10 +172,12 @@ void AgbMainLoop(void)
         PlayTimeCounter_Update();
         MapMusicMain();
 
+#if SOULLINK_DEV_TEST
         if (gSoulLink.mailboxFlags & SOULLINK_FLAG_DEV_SAFE_OVERWORLD)
         {
             SoulLink_ProcessOverworldCommands();
         }
+#endif
 
         WaitForVBlank();
     }

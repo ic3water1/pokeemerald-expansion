@@ -953,10 +953,12 @@ bool8 SoulLink_IsSafeOverworldState(void)
     }
 #endif
 
+#if SOULLINK_DEV_TEST
     if ((gSoulLink.mailboxFlags & SOULLINK_FLAG_DEV_SAFE_OVERWORLD) != 0)
     {
         return TRUE;
     }
+#endif
 
 #if __has_include("global.h")
     // Note: gBattleTypeFlags is intentionally NOT checked here because the game engine
@@ -1241,6 +1243,7 @@ void SoulLink_ProcessOverworldCommands(void)
         return;
     }
 
+#if SOULLINK_DEV_TEST
 #if __has_include("global.h")
     if ((gSoulLink.mailboxFlags & SOULLINK_FLAG_DEV_SAFE_OVERWORLD) != 0)
     {
@@ -1266,6 +1269,7 @@ void SoulLink_ProcessOverworldCommands(void)
             gSoulLink.routeState[MAPSEC_ROUTE_103] = ROUTE_STATE_ALIVE;
         }
     }
+#endif
 #endif
 
     // Drain reliable command ring buffer

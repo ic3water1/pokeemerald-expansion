@@ -1151,6 +1151,25 @@ TEST("SoulLink: Safe overworld state verification checks callback, fade, battle,
     gMain.callback2 = savedCallback;
 }
 
+TEST("SoulLink: Mailbox flag bit 6 cannot bypass safe overworld check in standard build")
+{
+    MainCallback savedCallback = gMain.callback2;
+    SoulLink_Init();
+    SoulLink_TestSetSafeOverworldOverride(FALSE, FALSE);
+
+    ScriptContext_Init();
+    UnlockPlayerFieldControls();
+    gBattleTypeFlags = 0;
+    gMain.callback2 = NULL; // Unsafe callback
+    gPaletteFade.active = 0;
+
+    // Setting mailbox flag bit 6 must NOT make unsafe overworld state return TRUE
+    gSoulLink.mailboxFlags |= (1 << 6);
+    EXPECT_EQ(SoulLink_IsSafeOverworldState(), FALSE);
+
+    gMain.callback2 = savedCallback;
+}
+
 TEST("SoulLink: Overworld commands execute safely after trainer battle with retained gBattleTypeFlags")
 {
     MainCallback savedCallback = gMain.callback2;
