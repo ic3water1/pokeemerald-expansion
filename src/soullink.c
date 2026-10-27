@@ -12,6 +12,8 @@
 #include "constants/maps.h"
 #include "constants/region_map_sections.h"
 #include "event_data.h"
+#include "palette.h"
+#include "script.h"
 #else
 struct MapHeader {
     u8 regionMapSectionId;
@@ -20,12 +22,18 @@ extern struct MapHeader gMapHeader;
 #endif
 
 // The dedicated EWRAM communication mailbox allocated in .sbss
-EWRAM_DATA __attribute__((used)) struct SoulLinkMailbox gSoulLink = {0};
+EWRAM_DATA __attribute__((used)) struct SoulLinkMailbox gSoulLink;
 
 // Monotonic sequence counters for reliable delivery (allocated in .bss, initialized in SoulLink_Init)
 static u16 sNextEventSequenceId;
 static u16 sNextCmdSequenceId;
 static u16 sNextLobbyRequestId;
+static u8 sFaintedPartyMask;
+
+#if TESTING
+static bool8 sTestSafeOverworldOverrideEnabled;
+static bool8 sTestSafeOverworldOverrideValue;
+#endif
 
 // Hard level caps indexed by unlockedGymStage (0 through 8)
 static const u8 sGymLevelCaps[] = {
@@ -49,6 +57,7 @@ void SoulLink_Init(void)
 {
     u32 i;
     u32 p;
+    u32 epoch;
 
     // Write magic signature for Lua bridge discovery
     gSoulLink.magic = SOULLINK_MAGIC;
@@ -60,9 +69,20 @@ void SoulLink_Init(void)
                            | SOULLINK_CAP_LOBBY_MANAGEMENT
                            | SOULLINK_CAP_RECONNECT_TOKEN
                            | SOULLINK_CAP_STABLE_ENCOUNTERS;
+
+    // Generate unique non-zero session epoch to isolate restarts
+    epoch = gSoulLink.sessionEpoch + 1;
+#if __has_include("global.h")
+    epoch ^= ((u32)Random() << 16) | (u32)Random();
+#endif
+    if (epoch == 0)
+    {
+        epoch = 1;
+    }
+    gSoulLink.sessionEpoch = epoch;
+
     gSoulLink.transportState = SOULLINK_TRANSPORT_OFFLINE;
     gSoulLink.mailboxFlags = 0;
-    gSoulLink.reservedHeader = 0;
 
     // Reset battle faint event tracker
     SoulLink_ClearFaintEvents();
@@ -72,6 +92,7 @@ void SoulLink_Init(void)
     gSoulLink.eventTail = 0;
     gSoulLink.lastAckedEventSequenceId = 0;
     gSoulLink.eventDropCount = 0;
+    gSoulLink.criticalOverflowCount = 0;
     memset(gSoulLink.eventQueue, 0, sizeof(gSoulLink.eventQueue));
 
     // Initialize incoming command ring buffer
@@ -84,20 +105,6 @@ void SoulLink_Init(void)
     // Clear lobby request and response
     memset(&gSoulLink.lobbyRequest, 0, sizeof(gSoulLink.lobbyRequest));
     memset(&gSoulLink.lobbyResponse, 0, sizeof(gSoulLink.lobbyResponse));
-
-    // Clear legacy single-slot mailboxes
-    gSoulLink.legacyOutEventType = SOULLINK_EVENT_NONE;
-    gSoulLink.legacyOutMapSec = 0;
-    gSoulLink.legacyOutSpecies = 0;
-    gSoulLink.legacyOutPrimaryType = 0;
-    gSoulLink.legacyOutSlotIndex = 0;
-
-    gSoulLink.legacyInCommandType = SOULLINK_CMD_NONE;
-    gSoulLink.legacyInTargetMapSec = 0;
-    gSoulLink.legacyInNotificationPlayerId = 0;
-    gSoulLink.legacyPadding[0] = 0;
-    gSoulLink.legacyPadding[1] = 0;
-    gSoulLink.legacyPadding[2] = 0;
 
     // Initial player count and alignment padding
     gSoulLink.playerCount = 1;
@@ -123,6 +130,11 @@ void SoulLink_Init(void)
     sNextEventSequenceId = 1;
     sNextCmdSequenceId = 1;
     sNextLobbyRequestId = 1;
+    sFaintedPartyMask = 0;
+#if TESTING
+    sTestSafeOverworldOverrideEnabled = FALSE;
+    sTestSafeOverworldOverrideValue = TRUE;
+#endif
 }
 
 /**
@@ -216,10 +228,15 @@ bool8 SoulLink_PushEvent(u8 eventType, u8 mapSec, u16 species, u8 primaryType, u
     {
         if (flags & SOULLINK_EVT_FLAG_CRITICAL)
         {
-            // CRITICAL EVENT (permanent death, forfeit, wipe):
-            // Cannot be discarded! Advance tail to make space and flag state dirty for reconciliation.
-            gSoulLink.eventTail++;
-            gSoulLink.mailboxFlags |= (SOULLINK_FLAG_CRITICAL_OVERFLOW | SOULLINK_FLAG_DIRTY_STATE);
+            // CRITICAL EVENT (permanent death, forfeit, catch, badge, wipe):
+            // Bounded queue is full and bridge has not acknowledged earlier events.
+            // The ROM MUST NOT advance the bridge-owned eventTail!
+            // Instead, record critical overflow and flag reconciliation required.
+            gSoulLink.criticalOverflowCount++;
+            gSoulLink.mailboxFlags |= (SOULLINK_FLAG_CRITICAL_OVERFLOW
+                                    | SOULLINK_FLAG_DIRTY_STATE
+                                    | SOULLINK_FLAG_RECONCILIATION_REQUIRED);
+            return FALSE;
         }
         else
         {
@@ -257,13 +274,6 @@ bool8 SoulLink_PushEvent(u8 eventType, u8 mapSec, u16 species, u8 primaryType, u
     // Advance write head
     gSoulLink.eventHead++;
 
-    // Mirror to legacy single-slot mailbox for backward compatibility with older tools
-    gSoulLink.legacyOutEventType = eventType;
-    gSoulLink.legacyOutMapSec = mapSec;
-    gSoulLink.legacyOutSpecies = species;
-    gSoulLink.legacyOutPrimaryType = primaryType;
-    gSoulLink.legacyOutSlotIndex = slotIndex;
-
     return TRUE;
 }
 
@@ -293,20 +303,45 @@ bool8 SoulLink_PopEvent(struct SoulLinkEvent *outEvent)
 
 /**
  * Acknowledges events up to sequenceId from the bridge.
- * Advances eventTail to clear acknowledged events from the buffer.
+ * Advances eventTail ONLY if sequenceId is found within the active pending queue window.
+ * Ignores unknown, stale, duplicate, or future sequence IDs to prevent clearing unacknowledged events.
  */
 void SoulLink_AcknowledgeEvents(u16 sequenceId)
 {
-    while (gSoulLink.eventTail != gSoulLink.eventHead)
+    u16 pending;
+    u16 i;
+    u16 matchSteps = 0;
+    bool8 found = FALSE;
+
+    if (sequenceId == 0)
     {
-        u16 slot = gSoulLink.eventTail & SOULLINK_QUEUE_MASK;
-        u16 seq = gSoulLink.eventQueue[slot].sequenceId;
-        gSoulLink.eventTail++;
-        if (seq == sequenceId)
+        return;
+    }
+
+    pending = (u16)(gSoulLink.eventHead - gSoulLink.eventTail);
+    if (pending == 0)
+    {
+        return;
+    }
+
+    for (i = 0; i < pending; i++)
+    {
+        u16 slot = (u16)(gSoulLink.eventTail + i) & SOULLINK_QUEUE_MASK;
+        if (gSoulLink.eventQueue[slot].sequenceId == sequenceId)
         {
+            found = TRUE;
+            matchSteps = i + 1;
             break;
         }
     }
+
+    if (!found)
+    {
+        // Stale, unknown, duplicate, or future ack: ignore, do NOT advance tail!
+        return;
+    }
+
+    gSoulLink.eventTail += matchSteps;
     gSoulLink.lastAckedEventSequenceId = sequenceId;
 }
 
@@ -324,6 +359,14 @@ u16 SoulLink_GetPendingEventCount(void)
 u16 SoulLink_GetEventDropCount(void)
 {
     return gSoulLink.eventDropCount;
+}
+
+/**
+ * Returns total count of critical events that overflowed the bounded buffer.
+ */
+u16 SoulLink_GetCriticalOverflowCount(void)
+{
+    return gSoulLink.criticalOverflowCount;
 }
 
 /**
@@ -454,8 +497,7 @@ void SoulLink_OnWildEncounterFailed(void)
     }
 }
 
-// Bitmask of party slots that fainted during the current battle
-static u8 sFaintedPartyMask = 0;
+
 
 /**
  * Records a permanent faint event at the exact instant the Pokémon faints in battle.
@@ -859,20 +901,55 @@ u16 SoulLink_GetPendingCommandCount(void)
     return (u16)(gSoulLink.cmdHead - gSoulLink.cmdTail);
 }
 
+#if TESTING
+void SoulLink_TestSetSafeOverworldOverride(bool8 enable, bool8 isSafe)
+{
+    sTestSafeOverworldOverrideEnabled = enable;
+    sTestSafeOverworldOverrideValue = isSafe;
+}
+#endif
+
+/**
+ * Checks whether the current game state is genuinely safe for processing incoming overworld commands.
+ * Commands must NEVER execute during battles, map fading/warps, active script dialogs, or locked controls.
+ */
+bool8 SoulLink_IsSafeOverworldState(void)
+{
+#if TESTING
+    if (sTestSafeOverworldOverrideEnabled)
+    {
+        return sTestSafeOverworldOverrideValue;
+    }
+#endif
+
+#if __has_include("global.h")
+    if (gBattleTypeFlags != 0)
+        return FALSE;
+    if (gMain.callback2 != CB2_Overworld)
+        return FALSE;
+    if (gPaletteFade.active)
+        return FALSE;
+    if (ScriptContext_IsEnabled())
+        return FALSE;
+    if (ArePlayerFieldControlsLocked())
+        return FALSE;
+    return TRUE;
+#else
+    return TRUE;
+#endif
+}
+
 /**
  * Safe overworld command dispatcher. Called during CB2_Overworld when ScriptContext is idle.
  * Processes incoming synchronized events (linked deaths, route locks, gym unlocks, party wipes).
- * DEFERRED EXECUTION: If in battle (gBattleTypeFlags != 0), execution is postponed until battle finishes.
+ * DEFERRED EXECUTION: If not in a genuinely safe overworld state, execution is postponed.
  */
 void SoulLink_ProcessOverworldCommands(void)
 {
-#if __has_include("global.h")
-    // Mid-battle: commands MUST remain deferred in queue until returning to overworld
-    if (gBattleTypeFlags != 0)
+    if (!SoulLink_IsSafeOverworldState())
     {
         return;
     }
-#endif
 
     // Drain reliable command ring buffer
     while (gSoulLink.cmdTail != gSoulLink.cmdHead)
@@ -880,77 +957,70 @@ void SoulLink_ProcessOverworldCommands(void)
         u16 slot = gSoulLink.cmdTail & SOULLINK_QUEUE_MASK;
         struct SoulLinkCommand *cmd = &gSoulLink.cmdQueue[slot];
 
+        // Replay & Duplicate Protection
+        if (cmd->sequenceId != 0 && cmd->sequenceId <= gSoulLink.lastExecutedCmdSequenceId)
+        {
+            cmd->executionStatus = SOULLINK_CMD_STATUS_DUPLICATE;
+            gSoulLink.cmdTail++;
+            continue;
+        }
+
         switch (cmd->cmdType)
         {
         case SOULLINK_CMD_KILL_MON:
-            // Linked partner's Pokémon fainted: Mark route dead
-            if (cmd->targetMapSec < NUM_MAPSECS)
-            {
-                gSoulLink.routeState[cmd->targetMapSec] = ROUTE_STATE_DEAD_FORFEITED;
-            }
-            break;
-
         case SOULLINK_CMD_LOCK_ROUTE:
-            // Partner failed/missed encounter: lock this route for all players
-            if (cmd->targetMapSec < NUM_MAPSECS)
+            if (cmd->targetMapSec >= NUM_MAPSECS)
+            {
+                cmd->executionStatus = SOULLINK_CMD_STATUS_REJECTED;
+            }
+            else
             {
                 gSoulLink.routeState[cmd->targetMapSec] = ROUTE_STATE_DEAD_FORFEITED;
+                cmd->executionStatus = SOULLINK_CMD_STATUS_SUCCESS;
             }
             break;
 
         case SOULLINK_CMD_UNLOCK_GYM:
-            // All connected players defeated the required Gym Leader; increment progression
-            if (gSoulLink.unlockedGymStage < 8)
-            {
-                gSoulLink.unlockedGymStage++;
-            }
-            break;
-
-        case SOULLINK_CMD_TRIGGER_WIPE:
-            // Global party wipe: whiteout state triggered across all clients
-            break;
-
-        default:
-            // Malformed or unknown command: ignore safely
-            break;
-        }
-
-        cmd->executionStatus = 1; // Mark executed
-        gSoulLink.lastExecutedCmdSequenceId = cmd->sequenceId;
-        gSoulLink.cmdTail++;
-    }
-
-    // Process legacy single-slot command if present (for backward compatibility)
-    if (gSoulLink.legacyInCommandType != SOULLINK_CMD_NONE)
-    {
-        u8 cmdType = gSoulLink.legacyInCommandType;
-        u8 mapSec = gSoulLink.legacyInTargetMapSec;
-
-        switch (cmdType)
         {
-        case SOULLINK_CMD_KILL_MON:
-        case SOULLINK_CMD_LOCK_ROUTE:
-            if (mapSec < NUM_MAPSECS)
+            u8 targetStage = (u8)cmd->paramValue;
+            if (targetStage == 0 && cmd->targetMapSec > 0)
             {
-                gSoulLink.routeState[mapSec] = ROUTE_STATE_DEAD_FORFEITED;
+                targetStage = cmd->targetMapSec;
             }
-            break;
 
-        case SOULLINK_CMD_UNLOCK_GYM:
-            if (gSoulLink.unlockedGymStage < 8)
+            if (targetStage == 0 || targetStage > 8)
             {
-                gSoulLink.unlockedGymStage++;
+                cmd->executionStatus = SOULLINK_CMD_STATUS_REJECTED;
             }
-            break;
-
-        case SOULLINK_CMD_TRIGGER_WIPE:
-            break;
-
-        default:
+            else
+            {
+                // Idempotent progression: advancing to targetStage cannot regress or double-count
+                if (targetStage > gSoulLink.unlockedGymStage)
+                {
+                    gSoulLink.unlockedGymStage = targetStage;
+                }
+                cmd->executionStatus = SOULLINK_CMD_STATUS_SUCCESS;
+            }
             break;
         }
 
-        gSoulLink.legacyInCommandType = SOULLINK_CMD_NONE;
+        case SOULLINK_CMD_TRIGGER_WIPE:
+            // Synchronized game-over screen is deferred to Phase 5
+            cmd->executionStatus = SOULLINK_CMD_STATUS_UNIMPLEMENTED;
+            break;
+
+        default:
+            // Unknown command type: rejected
+            cmd->executionStatus = SOULLINK_CMD_STATUS_REJECTED;
+            break;
+        }
+
+        if (cmd->executionStatus == SOULLINK_CMD_STATUS_SUCCESS)
+        {
+            gSoulLink.lastExecutedCmdSequenceId = cmd->sequenceId;
+        }
+
+        gSoulLink.cmdTail++;
     }
 }
 
@@ -984,21 +1054,74 @@ static u16 AllocateLobbyRequestId(void)
     return reqId;
 }
 
+static void SafeCopyBoundedString(u8 *dst, const u8 *src, u32 maxLen)
+{
+    u32 i;
+    bool8 nullFound = FALSE;
+    for (i = 0; i < maxLen; i++)
+    {
+        if (!nullFound && src != NULL && src[i] != 0)
+        {
+            dst[i] = src[i];
+        }
+        else
+        {
+            nullFound = TRUE;
+            dst[i] = 0;
+        }
+    }
+    dst[maxLen - 1] = 0;
+}
+
+static bool8 IsValidRoomCode(const u8 *code)
+{
+    u32 i;
+    if (code == NULL || code[0] == 0)
+    {
+        return FALSE;
+    }
+
+    for (i = 0; i < SOULLINK_ROOM_CODE_LEN; i++)
+    {
+        u8 c = code[i];
+        if (c == 0)
+        {
+            return (i > 0); // valid if at least 1 character before null
+        }
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')))
+        {
+            return FALSE; // invalid character
+        }
+    }
+    return TRUE;
+}
+
+/**
+ * Returns TRUE if a lobby request is currently pending coordinator response.
+ */
+bool8 SoulLink_IsLobbyRequestPending(void)
+{
+    return (gSoulLink.lobbyResponse.responseCode == SOULLINK_RESP_PENDING);
+}
+
 /**
  * Initiates an in-game lobby creation request.
  */
-void SoulLink_LobbyRequestCreate(u8 maxPlayers)
+bool8 SoulLink_LobbyRequestCreate(u8 maxPlayers)
 {
-    u32 i;
-    u16 reqId = AllocateLobbyRequestId();
+    u16 reqId;
 
+    if (SoulLink_IsLobbyRequestPending())
+    {
+        return FALSE; // Prevent accidental overwrite while request in-flight
+    }
+
+    reqId = AllocateLobbyRequestId();
     gSoulLink.lobbyRequest.requestId = reqId;
     gSoulLink.lobbyRequest.opCode = SOULLINK_LOBBY_OP_CREATE;
     gSoulLink.lobbyRequest.maxPlayers = (maxPlayers >= 2 && maxPlayers <= MAX_PLAYERS) ? maxPlayers : 2;
-    for (i = 0; i < SOULLINK_ROOM_CODE_LEN; i++)
-        gSoulLink.lobbyRequest.roomCode[i] = 0;
-    for (i = 0; i < SOULLINK_SESSION_TOKEN_LEN; i++)
-        gSoulLink.lobbyRequest.sessionToken[i] = 0;
+    SafeCopyBoundedString(gSoulLink.lobbyRequest.roomCode, NULL, SOULLINK_ROOM_CODE_LEN);
+    SafeCopyBoundedString(gSoulLink.lobbyRequest.sessionToken, NULL, SOULLINK_SESSION_TOKEN_LEN);
 
     // Check offline safety: if offline, immediate ERR_NO_BRIDGE response
     if (gSoulLink.transportState == SOULLINK_TRANSPORT_OFFLINE)
@@ -1013,25 +1136,33 @@ void SoulLink_LobbyRequestCreate(u8 maxPlayers)
         gSoulLink.lobbyResponse.opCode = SOULLINK_LOBBY_OP_CREATE;
         gSoulLink.lobbyResponse.responseCode = SOULLINK_RESP_PENDING;
     }
+
+    return TRUE;
 }
 
 /**
  * Initiates an in-game lobby join request with room code.
  */
-void SoulLink_LobbyRequestJoin(const u8 *roomCode)
+bool8 SoulLink_LobbyRequestJoin(const u8 *roomCode)
 {
-    u32 i;
-    u16 reqId = AllocateLobbyRequestId();
+    u16 reqId;
 
+    if (SoulLink_IsLobbyRequestPending())
+    {
+        return FALSE;
+    }
+
+    if (!IsValidRoomCode(roomCode))
+    {
+        return FALSE;
+    }
+
+    reqId = AllocateLobbyRequestId();
     gSoulLink.lobbyRequest.requestId = reqId;
     gSoulLink.lobbyRequest.opCode = SOULLINK_LOBBY_OP_JOIN;
     gSoulLink.lobbyRequest.maxPlayers = 0;
-    for (i = 0; i < SOULLINK_ROOM_CODE_LEN; i++)
-    {
-        gSoulLink.lobbyRequest.roomCode[i] = (roomCode != NULL && roomCode[i] != 0) ? roomCode[i] : 0;
-    }
-    for (i = 0; i < SOULLINK_SESSION_TOKEN_LEN; i++)
-        gSoulLink.lobbyRequest.sessionToken[i] = 0;
+    SafeCopyBoundedString(gSoulLink.lobbyRequest.roomCode, roomCode, SOULLINK_ROOM_CODE_LEN);
+    SafeCopyBoundedString(gSoulLink.lobbyRequest.sessionToken, NULL, SOULLINK_SESSION_TOKEN_LEN);
 
     if (gSoulLink.transportState == SOULLINK_TRANSPORT_OFFLINE)
     {
@@ -1045,15 +1176,23 @@ void SoulLink_LobbyRequestJoin(const u8 *roomCode)
         gSoulLink.lobbyResponse.opCode = SOULLINK_LOBBY_OP_JOIN;
         gSoulLink.lobbyResponse.responseCode = SOULLINK_RESP_PENDING;
     }
+
+    return TRUE;
 }
 
 /**
  * Signals ready or unready status in lobby.
  */
-void SoulLink_LobbyRequestReady(bool8 ready)
+bool8 SoulLink_LobbyRequestReady(bool8 ready)
 {
-    u16 reqId = AllocateLobbyRequestId();
+    u16 reqId;
 
+    if (SoulLink_IsLobbyRequestPending())
+    {
+        return FALSE;
+    }
+
+    reqId = AllocateLobbyRequestId();
     gSoulLink.lobbyRequest.requestId = reqId;
     gSoulLink.lobbyRequest.opCode = ready ? SOULLINK_LOBBY_OP_READY : SOULLINK_LOBBY_OP_UNREADY;
 
@@ -1069,15 +1208,23 @@ void SoulLink_LobbyRequestReady(bool8 ready)
         gSoulLink.lobbyResponse.opCode = gSoulLink.lobbyRequest.opCode;
         gSoulLink.lobbyResponse.responseCode = SOULLINK_RESP_PENDING;
     }
+
+    return TRUE;
 }
 
 /**
  * Host initiates synchronized run start.
  */
-void SoulLink_LobbyRequestStartRun(void)
+bool8 SoulLink_LobbyRequestStartRun(void)
 {
-    u16 reqId = AllocateLobbyRequestId();
+    u16 reqId;
 
+    if (SoulLink_IsLobbyRequestPending())
+    {
+        return FALSE;
+    }
+
+    reqId = AllocateLobbyRequestId();
     gSoulLink.lobbyRequest.requestId = reqId;
     gSoulLink.lobbyRequest.opCode = SOULLINK_LOBBY_OP_START_RUN;
 
@@ -1093,15 +1240,23 @@ void SoulLink_LobbyRequestStartRun(void)
         gSoulLink.lobbyResponse.opCode = SOULLINK_LOBBY_OP_START_RUN;
         gSoulLink.lobbyResponse.responseCode = SOULLINK_RESP_PENDING;
     }
+
+    return TRUE;
 }
 
 /**
  * Signals leaving the lobby.
  */
-void SoulLink_LobbyRequestLeave(void)
+bool8 SoulLink_LobbyRequestLeave(void)
 {
-    u16 reqId = AllocateLobbyRequestId();
+    u16 reqId;
 
+    if (SoulLink_IsLobbyRequestPending())
+    {
+        return FALSE;
+    }
+
+    reqId = AllocateLobbyRequestId();
     gSoulLink.lobbyRequest.requestId = reqId;
     gSoulLink.lobbyRequest.opCode = SOULLINK_LOBBY_OP_LEAVE;
 
@@ -1117,22 +1272,32 @@ void SoulLink_LobbyRequestLeave(void)
         gSoulLink.lobbyResponse.opCode = SOULLINK_LOBBY_OP_LEAVE;
         gSoulLink.lobbyResponse.responseCode = SOULLINK_RESP_PENDING;
     }
+
+    return TRUE;
 }
 
 /**
  * Reconnects using existing room code and session token.
  */
-void SoulLink_LobbyRequestReconnect(const u8 *roomCode, const u8 *sessionToken)
+bool8 SoulLink_LobbyRequestReconnect(const u8 *roomCode, const u8 *sessionToken)
 {
-    u32 i;
-    u16 reqId = AllocateLobbyRequestId();
+    u16 reqId;
 
+    if (SoulLink_IsLobbyRequestPending())
+    {
+        return FALSE;
+    }
+
+    if (!IsValidRoomCode(roomCode))
+    {
+        return FALSE;
+    }
+
+    reqId = AllocateLobbyRequestId();
     gSoulLink.lobbyRequest.requestId = reqId;
     gSoulLink.lobbyRequest.opCode = SOULLINK_LOBBY_OP_RECONNECT;
-    for (i = 0; i < SOULLINK_ROOM_CODE_LEN; i++)
-        gSoulLink.lobbyRequest.roomCode[i] = (roomCode != NULL) ? roomCode[i] : 0;
-    for (i = 0; i < SOULLINK_SESSION_TOKEN_LEN; i++)
-        gSoulLink.lobbyRequest.sessionToken[i] = (sessionToken != NULL) ? sessionToken[i] : 0;
+    SafeCopyBoundedString(gSoulLink.lobbyRequest.roomCode, roomCode, SOULLINK_ROOM_CODE_LEN);
+    SafeCopyBoundedString(gSoulLink.lobbyRequest.sessionToken, sessionToken, SOULLINK_SESSION_TOKEN_LEN);
 
     if (gSoulLink.transportState == SOULLINK_TRANSPORT_OFFLINE)
     {
@@ -1146,15 +1311,23 @@ void SoulLink_LobbyRequestReconnect(const u8 *roomCode, const u8 *sessionToken)
         gSoulLink.lobbyResponse.opCode = SOULLINK_LOBBY_OP_RECONNECT;
         gSoulLink.lobbyResponse.responseCode = SOULLINK_RESP_PENDING;
     }
+
+    return TRUE;
 }
 
 /**
  * Queries current lobby and player status.
  */
-void SoulLink_LobbyRequestGetStatus(void)
+bool8 SoulLink_LobbyRequestGetStatus(void)
 {
-    u16 reqId = AllocateLobbyRequestId();
+    u16 reqId;
 
+    if (SoulLink_IsLobbyRequestPending())
+    {
+        return FALSE;
+    }
+
+    reqId = AllocateLobbyRequestId();
     gSoulLink.lobbyRequest.requestId = reqId;
     gSoulLink.lobbyRequest.opCode = SOULLINK_LOBBY_OP_GET_STATUS;
 
@@ -1170,11 +1343,18 @@ void SoulLink_LobbyRequestGetStatus(void)
         gSoulLink.lobbyResponse.opCode = SOULLINK_LOBBY_OP_GET_STATUS;
         gSoulLink.lobbyResponse.responseCode = SOULLINK_RESP_PENDING;
     }
+
+    return TRUE;
 }
 
 #if TESTING
 void SoulLink_TestSetNextEventSequenceId(u16 seq)
 {
     sNextEventSequenceId = seq;
+}
+
+void SoulLink_TestSetSessionEpoch(u32 epoch)
+{
+    gSoulLink.sessionEpoch = epoch;
 }
 #endif

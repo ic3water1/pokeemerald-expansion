@@ -1,4 +1,8 @@
 #include "global.h"
+#include "main.h"
+#include "overworld.h"
+#include "palette.h"
+#include "script.h"
 #include "battle.h"
 #include "pokemon.h"
 #include "pokemon_storage_system.h"
@@ -586,7 +590,7 @@ TEST("SoulLink: Follower NPC battle faints remap to true party slots and process
 TEST("SoulLink: Mailbox layout, binary offsets, alignment, and total structure size assertions")
 {
     EXPECT_EQ(sizeof(struct SoulLinkMailbox), SOULLINK_MAILBOX_TOTAL_SIZE);
-    EXPECT_EQ(sizeof(struct SoulLinkMailbox), 5088);
+    EXPECT_EQ(sizeof(struct SoulLinkMailbox), 5080);
     EXPECT_EQ(sizeof(struct SoulLinkEvent), 12);
     EXPECT_EQ(sizeof(struct SoulLinkCommand), 12);
     EXPECT_EQ(sizeof(struct SoulLinkLobbyRequest), 24);
@@ -596,12 +600,14 @@ TEST("SoulLink: Mailbox layout, binary offsets, alignment, and total structure s
     EXPECT_EQ(offsetof(struct SoulLinkMailbox, magic), SOULLINK_OFFSET_MAGIC);
     EXPECT_EQ(offsetof(struct SoulLinkMailbox, protocolVersion), SOULLINK_OFFSET_PROTOCOL_VERSION);
     EXPECT_EQ(offsetof(struct SoulLinkMailbox, capabilities), SOULLINK_OFFSET_CAPABILITIES);
+    EXPECT_EQ(offsetof(struct SoulLinkMailbox, sessionEpoch), SOULLINK_OFFSET_SESSION_EPOCH);
     EXPECT_EQ(offsetof(struct SoulLinkMailbox, transportState), SOULLINK_OFFSET_TRANSPORT_STATE);
     EXPECT_EQ(offsetof(struct SoulLinkMailbox, mailboxFlags), SOULLINK_OFFSET_MAILBOX_FLAGS);
+    EXPECT_EQ(offsetof(struct SoulLinkMailbox, eventDropCount), SOULLINK_OFFSET_EVENT_DROP_COUNT);
+    EXPECT_EQ(offsetof(struct SoulLinkMailbox, criticalOverflowCount), SOULLINK_OFFSET_CRITICAL_OVERFLOW);
+    EXPECT_EQ(offsetof(struct SoulLinkMailbox, lastAckedEventSequenceId), SOULLINK_OFFSET_LAST_ACKED_EVENT);
     EXPECT_EQ(offsetof(struct SoulLinkMailbox, eventHead), SOULLINK_OFFSET_EVENT_HEAD);
     EXPECT_EQ(offsetof(struct SoulLinkMailbox, eventTail), SOULLINK_OFFSET_EVENT_TAIL);
-    EXPECT_EQ(offsetof(struct SoulLinkMailbox, lastAckedEventSequenceId), SOULLINK_OFFSET_LAST_ACKED_EVENT);
-    EXPECT_EQ(offsetof(struct SoulLinkMailbox, eventDropCount), SOULLINK_OFFSET_EVENT_DROP_COUNT);
     EXPECT_EQ(offsetof(struct SoulLinkMailbox, eventQueue), SOULLINK_OFFSET_EVENT_QUEUE);
     EXPECT_EQ(offsetof(struct SoulLinkMailbox, cmdHead), SOULLINK_OFFSET_CMD_HEAD);
     EXPECT_EQ(offsetof(struct SoulLinkMailbox, cmdTail), SOULLINK_OFFSET_CMD_TAIL);
@@ -610,7 +616,6 @@ TEST("SoulLink: Mailbox layout, binary offsets, alignment, and total structure s
     EXPECT_EQ(offsetof(struct SoulLinkMailbox, cmdQueue), SOULLINK_OFFSET_CMD_QUEUE);
     EXPECT_EQ(offsetof(struct SoulLinkMailbox, lobbyRequest), SOULLINK_OFFSET_LOBBY_REQUEST);
     EXPECT_EQ(offsetof(struct SoulLinkMailbox, lobbyResponse), SOULLINK_OFFSET_LOBBY_RESPONSE);
-    EXPECT_EQ(offsetof(struct SoulLinkMailbox, legacyOutEventType), SOULLINK_OFFSET_LEGACY_OUT_TYPE);
     EXPECT_EQ(offsetof(struct SoulLinkMailbox, playerCount), SOULLINK_OFFSET_PLAYER_COUNT);
     EXPECT_EQ(offsetof(struct SoulLinkMailbox, unlockedGymStage), SOULLINK_OFFSET_UNLOCKED_GYM);
     EXPECT_EQ(offsetof(struct SoulLinkMailbox, routeState), SOULLINK_OFFSET_ROUTE_STATE);
@@ -719,14 +724,10 @@ TEST("SoulLink: Multiple in-battle faints queued reliably in FIFO sequence befor
 
     EXPECT_EQ(SoulLink_GetPendingEventCount(), 0);
 
-    // Verify legacy mirror held the most recent faint
-    EXPECT_EQ(gSoulLink.legacyOutEventType, SOULLINK_EVENT_FAINTED);
-    EXPECT_EQ(gSoulLink.legacyOutSlotIndex, 2);
-
     SoulLink_ClearFaintEvents();
 }
 
-TEST("SoulLink: Event queue-full handling drops non-critical events and protects critical deaths")
+TEST("SoulLink: Event queue-full handling drops non-critical events and flags reconciliation for critical events")
 {
     u32 i;
     struct SoulLinkEvent evt;
@@ -750,22 +751,25 @@ TEST("SoulLink: Event queue-full handling drops non-critical events and protects
     EXPECT_EQ(SoulLink_GetPendingEventCount(), 16);
     EXPECT(gSoulLink.mailboxFlags & SOULLINK_FLAG_QUEUE_OVERFLOW);
 
-    // A CRITICAL event (e.g. FAINTED) must NEVER be discarded even when queue is full!
+    // A CRITICAL event (e.g. FAINTED) on a full queue must NOT advance bridge-owned eventTail
+    // Instead, criticalOverflowCount increments and SOULLINK_FLAG_RECONCILIATION_REQUIRED is set
     bool8 critPushed = SoulLink_PushEvent(SOULLINK_EVENT_FAINTED, MAPSEC_ROUTE_104, SPECIES_PIKACHU, TYPE_ELECTRIC, 0, SOULLINK_EVT_FLAG_CRITICAL);
-    EXPECT_EQ(critPushed, TRUE);
-    EXPECT_EQ(SoulLink_GetPendingEventCount(), 16); // Tail advanced to accommodate critical event
+    EXPECT_EQ(critPushed, FALSE);
+    EXPECT_EQ(SoulLink_GetPendingEventCount(), 16);
+    EXPECT_EQ(gSoulLink.eventTail, 0);
+    EXPECT_EQ(SoulLink_GetCriticalOverflowCount(), 1);
     EXPECT(gSoulLink.mailboxFlags & SOULLINK_FLAG_CRITICAL_OVERFLOW);
     EXPECT(gSoulLink.mailboxFlags & SOULLINK_FLAG_DIRTY_STATE);
+    EXPECT(gSoulLink.mailboxFlags & SOULLINK_FLAG_RECONCILIATION_REQUIRED);
 
-    // Drain events to verify the critical event is safely stored at the tail
-    for (i = 0; i < 15; i++)
+    // Drain events to verify the 16 original events are safely preserved in FIFO order
+    for (i = 0; i < 16; i++)
     {
         EXPECT_EQ(SoulLink_PopEvent(&evt), TRUE);
+        EXPECT_EQ(evt.eventType, SOULLINK_EVENT_MAP_CHANGE);
+        EXPECT_EQ(evt.mapSec, (u8)i);
     }
-    EXPECT_EQ(SoulLink_PopEvent(&evt), TRUE);
-    EXPECT_EQ(evt.eventType, SOULLINK_EVENT_FAINTED);
-    EXPECT_EQ(evt.species, SPECIES_PIKACHU);
-    EXPECT_EQ(evt.mapSec, MAPSEC_ROUTE_104);
+    EXPECT_EQ(SoulLink_GetPendingEventCount(), 0);
 }
 
 TEST("SoulLink: 16-bit sequence number wraparound across 65535 skips 0 and preserves order")
@@ -812,14 +816,15 @@ TEST("SoulLink: Incoming command ring buffer deferred in battle and executed in 
 
     cmd2.sequenceId = 102;
     cmd2.cmdType = SOULLINK_CMD_UNLOCK_GYM;
-    cmd2.targetMapSec = 0;
+    cmd2.paramValue = 1;
+    cmd2.targetMapSec = 1;
 
     EXPECT_EQ(SoulLink_ReceiveCommand(&cmd1), TRUE);
     EXPECT_EQ(SoulLink_ReceiveCommand(&cmd2), TRUE);
     EXPECT_EQ(SoulLink_GetPendingCommandCount(), 2);
 
     // Simulate in-battle state: execution must be deferred
-    gBattleTypeFlags = BATTLE_TYPE_TRAINER;
+    SoulLink_TestSetSafeOverworldOverride(TRUE, FALSE);
     SoulLink_ProcessOverworldCommands();
 
     // Commands must remain untouched in buffer
@@ -828,13 +833,15 @@ TEST("SoulLink: Incoming command ring buffer deferred in battle and executed in 
     EXPECT_EQ(gSoulLink.unlockedGymStage, 0);
 
     // Return to overworld: execution proceeds safely
-    gBattleTypeFlags = 0;
+    SoulLink_TestSetSafeOverworldOverride(TRUE, TRUE);
     SoulLink_ProcessOverworldCommands();
 
     EXPECT_EQ(SoulLink_GetPendingCommandCount(), 0);
     EXPECT_EQ(gSoulLink.routeState[MAPSEC_ROUTE_105], ROUTE_STATE_DEAD_FORFEITED);
     EXPECT_EQ(gSoulLink.unlockedGymStage, 1);
     EXPECT_EQ(gSoulLink.lastExecutedCmdSequenceId, cmd2.sequenceId);
+
+    SoulLink_TestSetSafeOverworldOverride(FALSE, FALSE);
 }
 
 TEST("SoulLink: Malformed and unknown commands are safely ignored without memory corruption")
@@ -851,12 +858,15 @@ TEST("SoulLink: Malformed and unknown commands are safely ignored without memory
     EXPECT_EQ(SoulLink_ReceiveCommand(&malformed), TRUE);
     EXPECT_EQ(SoulLink_GetPendingCommandCount(), 1);
 
-    gBattleTypeFlags = 0;
+    SoulLink_TestSetSafeOverworldOverride(TRUE, TRUE);
     SoulLink_ProcessOverworldCommands();
+    SoulLink_TestSetSafeOverworldOverride(FALSE, FALSE);
 
     // Command queue must be safely drained without crash or corrupted route state
     EXPECT_EQ(SoulLink_GetPendingCommandCount(), 0);
-    EXPECT_EQ(gSoulLink.lastExecutedCmdSequenceId, malformed.sequenceId);
+    // Malformed commands are rejected, so lastExecutedCmdSequenceId must NOT be advanced to 201
+    EXPECT_EQ(gSoulLink.lastExecutedCmdSequenceId, 0);
+    EXPECT_EQ(gSoulLink.cmdQueue[0].executionStatus, SOULLINK_CMD_STATUS_REJECTED);
 }
 
 TEST("SoulLink: Offline safety and missing bridge behavior returns ERR_NO_BRIDGE immediately")
@@ -893,6 +903,255 @@ TEST("SoulLink: Offline safety and missing bridge behavior returns ERR_NO_BRIDGE
     SoulLink_SetTransportState(SOULLINK_TRANSPORT_CONNECTED);
     EXPECT_EQ(SoulLink_GetTransportState(), SOULLINK_TRANSPORT_CONNECTED);
 
+    // Clear request and response to test pending transition
+    memset(&gSoulLink.lobbyRequest, 0, sizeof(gSoulLink.lobbyRequest));
+    memset(&gSoulLink.lobbyResponse, 0, sizeof(gSoulLink.lobbyResponse));
     SoulLink_LobbyRequestCreate(2);
     EXPECT_EQ(gSoulLink.lobbyResponse.responseCode, SOULLINK_RESP_PENDING);
+}
+
+TEST("SoulLink: Critical event overflow flags reconciliation and preserves local Nuzlocke state")
+{
+    u32 i;
+    u8 metLoc = MAPSEC_ROUTE_101;
+    u16 zeroHp = 0;
+
+    SoulLink_Init();
+    SoulLink_NewGame();
+    gPokemonStoragePtr = &gPokemonStorage.block;
+    ResetPokemonStorageSystem();
+
+    // Fill queue to capacity (16 items)
+    for (i = 0; i < SOULLINK_EVENT_QUEUE_SIZE; i++)
+    {
+        SoulLink_PushEvent(SOULLINK_EVENT_MAP_CHANGE, (u8)i, 0, 0, 0, 0);
+    }
+    EXPECT_EQ(SoulLink_GetPendingEventCount(), 16);
+    EXPECT_EQ(gSoulLink.eventTail, 0);
+    EXPECT_EQ(SoulLink_GetCriticalOverflowCount(), 0);
+
+    // Setup living mon on route 101
+    gSoulLink.routeState[metLoc] = ROUTE_STATE_ALIVE;
+    ZeroMonData(&gParties[B_TRAINER_PLAYER][0]);
+    CreateMon(&gParties[B_TRAINER_PLAYER][0], SPECIES_TREECKO, 10, 0, OTID_STRUCT_PRESET(0));
+    CalculateMonStats(&gParties[B_TRAINER_PLAYER][0]);
+    SetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_MET_LOCATION, &metLoc);
+    SetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_HP, &zeroHp);
+
+    // Mon faints in battle: RecordFaintEvent emits critical FAINTED event
+    SoulLink_RecordFaintEvent(0);
+
+    // Queue was full:
+    // 1. eventTail was NOT moved by ROM (single-writer ownership preserved)
+    EXPECT_EQ(gSoulLink.eventTail, 0);
+    EXPECT_EQ(SoulLink_GetPendingEventCount(), 16);
+    // 2. Critical overflow is tracked
+    EXPECT_EQ(SoulLink_GetCriticalOverflowCount(), 1);
+    EXPECT(gSoulLink.mailboxFlags & SOULLINK_FLAG_CRITICAL_OVERFLOW);
+    EXPECT(gSoulLink.mailboxFlags & SOULLINK_FLAG_RECONCILIATION_REQUIRED);
+    // 3. Local Nuzlocke death is NOT lost in game state
+    EXPECT_EQ(gSoulLink.routeState[metLoc], ROUTE_STATE_DEAD_FORFEITED);
+
+    SoulLink_ClearFaintEvents();
+}
+
+TEST("SoulLink: Sequence acknowledgments safely ignore zero, unknown, stale, future, and duplicate sequence IDs")
+{
+    SoulLink_Init();
+
+    // Push 5 events (seq 1..5)
+    SoulLink_EmitEvent(SOULLINK_EVENT_MAP_CHANGE, 1, 0, 0, 0);
+    SoulLink_EmitEvent(SOULLINK_EVENT_MAP_CHANGE, 2, 0, 0, 0);
+    SoulLink_EmitEvent(SOULLINK_EVENT_MAP_CHANGE, 3, 0, 0, 0);
+    SoulLink_EmitEvent(SOULLINK_EVENT_MAP_CHANGE, 4, 0, 0, 0);
+    SoulLink_EmitEvent(SOULLINK_EVENT_MAP_CHANGE, 5, 0, 0, 0);
+    EXPECT_EQ(SoulLink_GetPendingEventCount(), 5);
+    EXPECT_EQ(gSoulLink.eventTail, 0);
+
+    // Ack with 0: ignored
+    SoulLink_AcknowledgeEvents(0);
+    EXPECT_EQ(SoulLink_GetPendingEventCount(), 5);
+    EXPECT_EQ(gSoulLink.eventTail, 0);
+
+    // Ack with unknown/future ID 999: ignored
+    SoulLink_AcknowledgeEvents(999);
+    EXPECT_EQ(SoulLink_GetPendingEventCount(), 5);
+    EXPECT_EQ(gSoulLink.eventTail, 0);
+
+    // Valid ack up to seq 3: advances tail by 3
+    SoulLink_AcknowledgeEvents(3);
+    EXPECT_EQ(SoulLink_GetPendingEventCount(), 2);
+    EXPECT_EQ(gSoulLink.eventTail, 3);
+    EXPECT_EQ(gSoulLink.lastAckedEventSequenceId, 3);
+
+    // Stale ack (seq 2, already acknowledged): ignored
+    SoulLink_AcknowledgeEvents(2);
+    EXPECT_EQ(SoulLink_GetPendingEventCount(), 2);
+    EXPECT_EQ(gSoulLink.eventTail, 3);
+
+    // Duplicate ack (seq 3): ignored
+    SoulLink_AcknowledgeEvents(3);
+    EXPECT_EQ(SoulLink_GetPendingEventCount(), 2);
+    EXPECT_EQ(gSoulLink.eventTail, 3);
+
+    // Future jump (seq 10): ignored
+    SoulLink_AcknowledgeEvents(10);
+    EXPECT_EQ(SoulLink_GetPendingEventCount(), 2);
+    EXPECT_EQ(gSoulLink.eventTail, 3);
+
+    // Valid ack for seq 5: clears remaining events
+    SoulLink_AcknowledgeEvents(5);
+    EXPECT_EQ(SoulLink_GetPendingEventCount(), 0);
+    EXPECT_EQ(gSoulLink.eventTail, 5);
+    EXPECT_EQ(gSoulLink.lastAckedEventSequenceId, 5);
+}
+
+TEST("SoulLink: Incoming commands enforce duplicate/replay protection, execution status, and idempotent gym progression")
+{
+    struct SoulLinkCommand cmd = {0};
+
+    SoulLink_Init();
+    SoulLink_NewGame();
+    SoulLink_TestSetSafeOverworldOverride(TRUE, TRUE);
+
+    // 1. First command: UNLOCK_GYM stage 2 with sequence 10
+    cmd.sequenceId = 10;
+    cmd.cmdType = SOULLINK_CMD_UNLOCK_GYM;
+    cmd.paramValue = 2;
+    cmd.executionStatus = SOULLINK_CMD_STATUS_PENDING;
+    SoulLink_ReceiveCommand(&cmd);
+    SoulLink_ProcessOverworldCommands();
+
+    EXPECT_EQ(gSoulLink.unlockedGymStage, 2);
+    EXPECT_EQ(gSoulLink.lastExecutedCmdSequenceId, 10);
+    EXPECT_EQ(gSoulLink.cmdQueue[0].executionStatus, SOULLINK_CMD_STATUS_SUCCESS);
+
+    // 2. Replay duplicate command with sequence 10: must be marked DUPLICATE and not executed
+    cmd.sequenceId = 10;
+    cmd.paramValue = 3; // Even if conflicting param
+    cmd.executionStatus = SOULLINK_CMD_STATUS_PENDING;
+    SoulLink_ReceiveCommand(&cmd);
+    SoulLink_ProcessOverworldCommands();
+
+    EXPECT_EQ(gSoulLink.unlockedGymStage, 2); // Unchanged!
+    EXPECT_EQ(gSoulLink.cmdQueue[1].executionStatus, SOULLINK_CMD_STATUS_DUPLICATE);
+
+    // 3. Stale sequence command (sequence 5 <= 10): marked DUPLICATE
+    cmd.sequenceId = 5;
+    cmd.paramValue = 4;
+    cmd.executionStatus = SOULLINK_CMD_STATUS_PENDING;
+    SoulLink_ReceiveCommand(&cmd);
+    SoulLink_ProcessOverworldCommands();
+
+    EXPECT_EQ(gSoulLink.unlockedGymStage, 2);
+    EXPECT_EQ(gSoulLink.cmdQueue[2].executionStatus, SOULLINK_CMD_STATUS_DUPLICATE);
+
+    // 4. Idempotent progression: New command seq 11 requesting lower/equal stage (stage 1)
+    cmd.sequenceId = 11;
+    cmd.paramValue = 1;
+    cmd.executionStatus = SOULLINK_CMD_STATUS_PENDING;
+    SoulLink_ReceiveCommand(&cmd);
+    SoulLink_ProcessOverworldCommands();
+
+    EXPECT_EQ(gSoulLink.unlockedGymStage, 2); // Cannot regress
+    EXPECT_EQ(gSoulLink.lastExecutedCmdSequenceId, 11);
+    EXPECT_EQ(gSoulLink.cmdQueue[3].executionStatus, SOULLINK_CMD_STATUS_SUCCESS);
+
+    // 5. TRIGGER_WIPE command is marked UNIMPLEMENTED
+    cmd.sequenceId = 12;
+    cmd.cmdType = SOULLINK_CMD_TRIGGER_WIPE;
+    cmd.paramValue = 0;
+    cmd.executionStatus = SOULLINK_CMD_STATUS_PENDING;
+    SoulLink_ReceiveCommand(&cmd);
+    SoulLink_ProcessOverworldCommands();
+
+    EXPECT_EQ(gSoulLink.lastExecutedCmdSequenceId, 11); // Not advanced on UNIMPLEMENTED
+    EXPECT_EQ(gSoulLink.cmdQueue[4].executionStatus, SOULLINK_CMD_STATUS_UNIMPLEMENTED);
+
+    SoulLink_TestSetSafeOverworldOverride(FALSE, FALSE);
+}
+
+TEST("SoulLink: Lobby requests reject concurrent pending requests and validate room code bounds")
+{
+    SoulLink_Init();
+    SoulLink_SetTransportState(SOULLINK_TRANSPORT_CONNECTED);
+
+    // First request initiates cleanly
+    EXPECT_EQ(SoulLink_IsLobbyRequestPending(), FALSE);
+    EXPECT_EQ(SoulLink_LobbyRequestCreate(4), TRUE);
+    EXPECT_EQ(SoulLink_IsLobbyRequestPending(), TRUE);
+    EXPECT_EQ(gSoulLink.lobbyResponse.responseCode, SOULLINK_RESP_PENDING);
+
+    // Concurrent second request while pending must be REJECTED
+    EXPECT_EQ(SoulLink_LobbyRequestJoin((const u8 *)"ABCD12"), FALSE);
+    EXPECT_EQ(SoulLink_LobbyRequestReady(TRUE), FALSE);
+    EXPECT_EQ(SoulLink_LobbyRequestStartRun(), FALSE);
+    EXPECT_EQ(SoulLink_LobbyRequestLeave(), FALSE);
+
+    // Simulate coordinator response acknowledgment
+    gSoulLink.lobbyResponse.ackRequestId = gSoulLink.lobbyRequest.requestId;
+    gSoulLink.lobbyResponse.responseCode = SOULLINK_RESP_OK;
+    EXPECT_EQ(SoulLink_IsLobbyRequestPending(), FALSE);
+
+    // Room code validation: invalid characters rejected
+    EXPECT_EQ(SoulLink_LobbyRequestJoin((const u8 *)"BAD@$$"), FALSE);
+    EXPECT_EQ(SoulLink_LobbyRequestJoin((const u8 *)"SP ACE"), FALSE);
+    EXPECT_EQ(SoulLink_LobbyRequestJoin(NULL), FALSE);
+
+    // Valid alphanumeric room code accepted
+    EXPECT_EQ(SoulLink_LobbyRequestJoin((const u8 *)"ROOM42"), TRUE);
+    EXPECT_EQ(SoulLink_IsLobbyRequestPending(), TRUE);
+}
+
+TEST("SoulLink: Safe overworld state verification checks callback, fade, battle, script, and lock status")
+{
+    MainCallback savedCallback = gMain.callback2;
+    SoulLink_Init();
+    SoulLink_TestSetSafeOverworldOverride(FALSE, FALSE);
+
+    ScriptContext_Init();
+    UnlockPlayerFieldControls();
+    gBattleTypeFlags = 0;
+    gMain.callback2 = CB2_Overworld;
+    gPaletteFade.active = 0;
+
+    // Normal overworld state: safe
+    EXPECT_EQ(SoulLink_IsSafeOverworldState(), TRUE);
+
+    // Active battle: unsafe
+    gBattleTypeFlags = BATTLE_TYPE_TRAINER;
+    EXPECT_EQ(SoulLink_IsSafeOverworldState(), FALSE);
+    gBattleTypeFlags = 0;
+
+    // Screen fading / map transition: unsafe
+    gPaletteFade.active = 1;
+    EXPECT_EQ(SoulLink_IsSafeOverworldState(), FALSE);
+    gPaletteFade.active = 0;
+
+    // Non-overworld callback (e.g. party menu, PC, bag): unsafe
+    gMain.callback2 = NULL;
+    EXPECT_EQ(SoulLink_IsSafeOverworldState(), FALSE);
+    gMain.callback2 = CB2_Overworld;
+
+    EXPECT_EQ(SoulLink_IsSafeOverworldState(), TRUE);
+
+    // Restore TestRunner callback so test runner loop continues safely
+    gMain.callback2 = savedCallback;
+}
+
+TEST("SoulLink: Session epoch generates distinct non-zero session identity across boots")
+{
+    SoulLink_Init();
+    u32 epoch1 = gSoulLink.sessionEpoch;
+    EXPECT(epoch1 != 0);
+
+    // Second boot / reset produces a different non-zero epoch
+    SoulLink_Init();
+    u32 epoch2 = gSoulLink.sessionEpoch;
+    EXPECT(epoch2 != 0);
+    EXPECT(epoch1 != epoch2);
+
+    // Test helper to set epoch
+    SoulLink_TestSetSessionEpoch(0x12345678);
+    EXPECT_EQ(gSoulLink.sessionEpoch, 0x12345678);
 }
