@@ -672,7 +672,7 @@ static void MultiMove_Free(void);
 static bool8 MultiMove_Init(void);
 static bool8 MultiMove_RunFunction(void);
 static bool8 MultiMove_TryMoveGroup(u8);
-static bool8 MultiMove_CanPlaceSelection(void);
+bool8 MultiMove_CanPlaceSelection(void);
 static void MultiMove_SetFunction(u8);
 static u8 MultiMove_GetOrigin(void);
 static bool8 MultiMove_Start(void);
@@ -799,7 +799,7 @@ static void Task_InitBox(u8);
 static void SetUpScrollToBox(u8);
 static bool8 ScrollToBox(void);
 static s8 DetermineBoxScrollDirection(u8);
-static void SetCurrentBox(u8);
+void SetCurrentBox(u8);
 static struct BoxPokemon *GetCursorBoxMon(void);
 
 // Misc
@@ -7292,6 +7292,8 @@ static u8 InBoxInput_Normal(void)
             }
             else
             {
+                if (StorageGetCurrentBox() == SOULLINK_GRAVEYARD_BOX)
+                    return INPUT_NONE;
                 sStorage->inBoxMovingMode = MOVE_MODE_MULTIPLE_SELECTING;
                 return INPUT_MULTIMOVE_START;
             }
@@ -8420,6 +8422,9 @@ static bool8 MultiMove_GrabSelection(void)
 {
     bool8 movingBg, movingMon;
 
+    if (StorageGetCurrentBox() == SOULLINK_GRAVEYARD_BOX)
+        return FALSE;
+
     switch (sMultiMove->state)
     {
     case 0:
@@ -8779,12 +8784,21 @@ static u8 MultiMove_GetOrigin(void)
     return (IN_BOX_COLUMNS * sMultiMove->fromRow) + sMultiMove->fromColumn;
 }
 
-static bool8 MultiMove_CanPlaceSelection(void)
+bool8 MultiMove_CanPlaceSelection(void)
 {
     s32 i, j;
-    s32 columnCount = sMultiMove->minColumn + sMultiMove->columnsTotal;
-    s32 rowCount = sMultiMove->minRow + sMultiMove->rowsTotal;
+    s32 columnCount;
+    s32 rowCount;
     u8 monArrayId = 0;
+
+    if (StorageGetCurrentBox() == SOULLINK_GRAVEYARD_BOX)
+        return FALSE;
+
+    if (sMultiMove == NULL)
+        return FALSE;
+
+    columnCount = sMultiMove->minColumn + sMultiMove->columnsTotal;
+    rowCount = sMultiMove->minRow + sMultiMove->rowsTotal;
 
     for (i = sMultiMove->minRow; i < rowCount; i++)
     {
@@ -9568,7 +9582,7 @@ u8 StorageGetCurrentBox(void)
     return gPokemonStoragePtr->currentBox;
 }
 
-static void SetCurrentBox(u8 boxId)
+void SetCurrentBox(u8 boxId)
 {
     if (boxId < TOTAL_BOXES_COUNT)
         gPokemonStoragePtr->currentBox = boxId;

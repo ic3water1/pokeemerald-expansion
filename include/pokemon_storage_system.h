@@ -39,6 +39,8 @@ void ShowPokemonStorageSystemPC(void);
 void ResetPokemonStorageSystem(void);
 s16 CompactPartySlots(void);
 u8 StorageGetCurrentBox(void);
+void SetCurrentBox(u8 boxId);
+bool8 MultiMove_CanPlaceSelection(void);
 u32 GetBoxMonDataAt(u8 boxId, u8 boxPosition, s32 request);
 void SetBoxMonDataAt(u8 boxId, u8 boxPosition, s32 request, const void *value);
 u32 GetCurrentBoxMonData(u8 boxPosition, s32 request);

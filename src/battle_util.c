@@ -38,6 +38,7 @@
 #include "link.h"
 #include "malloc.h"
 #include "berry.h"
+#include "soullink.h"
 #include "pokedex.h"
 #include "mail.h"
 #include "field_weather.h"
@@ -11226,6 +11227,10 @@ void SetValuesOnFaint(enum BattlerId battler)
             gBattleResults.playerFaintCounter++;
         AdjustFriendshipOnBattleFaint(battler);
         gSideTimers[B_SIDE_PLAYER].retaliateTimer = 2;
+        if (GetBattlerTrainer(battler) == B_TRAINER_PLAYER)
+        {
+            SoulLink_RecordFaintEvent(gBattlerPartyIndexes[battler]);
+        }
     }
     else
     {

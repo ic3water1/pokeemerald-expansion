@@ -180,25 +180,14 @@ u16 SoulLink_GetEncounterId(void)
 }
 
 /**
- * Returns the recorded encounter ID for a caught Pokémon, disambiguating split routes.
+ * Returns the recorded encounter ID for a caught Pokémon.
+ * Stably reads the per-Pokémon encounter identity stored in its metLocation field.
  */
 u16 SoulLink_GetEncounterIdForMon(struct Pokemon *mon)
 {
 #if __has_include("global.h")
     u8 metLoc = (u8)GetMonData(mon, MON_DATA_MET_LOCATION);
-    u16 species = GetMonData(mon, MON_DATA_SPECIES);
-
-    if (metLoc == MAPSEC_ROUTE_104)
-    {
-        // If Route 104 North was registered with this species, attribute death to Route 104 North
-        if (gSoulLink.routeSpecies[ENCOUNTER_ID_ROUTE_104_NORTH][0] == species)
-        {
-            return ENCOUNTER_ID_ROUTE_104_NORTH;
-        }
-        return ENCOUNTER_ID_ROUTE_104_SOUTH;
-    }
-
-    return (u16)metLoc;
+    return metLoc;
 #else
     return 0;
 #endif
@@ -278,9 +267,45 @@ void SoulLink_OnWildEncounterFailed(void)
     }
 }
 
+// Bitmask of party slots that fainted during the current battle
+static u8 sFaintedPartyMask = 0;
+
+/**
+ * Records a permanent faint event at the exact instant the Pokémon faints in battle.
+ * Immediately locks/forfeits the encounter route and emits the death event.
+ */
+void SoulLink_RecordFaintEvent(u8 partyIndex)
+{
+    if (partyIndex < PARTY_SIZE)
+    {
+        sFaintedPartyMask |= (1 << partyIndex);
+
+#if __has_include("global.h")
+        struct Pokemon *mon = &gParties[B_TRAINER_PLAYER][partyIndex];
+        u16 encounterId = SoulLink_GetEncounterIdForMon(mon);
+        u16 species = GetMonData(mon, MON_DATA_SPECIES);
+        u8 primaryType = 0;
+
+        if (species < NUM_SPECIES)
+        {
+            primaryType = gSpeciesInfo[species].types[0];
+        }
+
+        // Immediately mark route as dead upon the actual faint event
+        if (encounterId < NUM_MAPSECS)
+        {
+            gSoulLink.routeState[encounterId] = ROUTE_STATE_DEAD_FORFEITED;
+        }
+
+        SoulLink_EmitEvent(SOULLINK_EVENT_FAINTED, (u8)encounterId, species, primaryType, partyIndex);
+#endif
+    }
+}
+
 /**
  * Processes fainted party members upon return to overworld.
  * Moves fainted Pokémon safely to the Graveyard box (Box 14), marks routes dead, and emits events.
+ * Handles both Pokémon with 0 HP and those recorded in sFaintedPartyMask (preventing revive bypass).
  * Crucially: Never zeroes or deletes a Pokémon unless it has been safely stored in the Graveyard box.
  */
 void SoulLink_ProcessFaintedMonsPostBattle(void)
@@ -297,12 +322,17 @@ void SoulLink_ProcessFaintedMonsPostBattle(void)
         u16 encounterId;
         u8 primaryType;
         bool8 storedInGraveyard = FALSE;
+        bool8 didFaintInBattle = (sFaintedPartyMask & (1 << i)) != 0;
 
-        if (species == SPECIES_NONE || hp > 0)
+        if (species == SPECIES_NONE)
+            continue;
+
+        // Process if either currently at 0 HP OR fainted during the battle (revive attempt)
+        if (hp > 0 && !didFaintInBattle)
             continue;
 
         encounterId = SoulLink_GetEncounterIdForMon(mon);
-        primaryType = gSpeciesInfo[species].types[0];
+        primaryType = (species < NUM_SPECIES) ? gSpeciesInfo[species].types[0] : 0;
 
         // Mark route link as dead
         if (encounterId < NUM_MAPSECS)
@@ -310,8 +340,15 @@ void SoulLink_ProcessFaintedMonsPostBattle(void)
             gSoulLink.routeState[encounterId] = ROUTE_STATE_DEAD_FORFEITED;
         }
 
-        // Emit death event
-        SoulLink_EmitEvent(SOULLINK_EVENT_FAINTED, (u8)encounterId, species, primaryType, (u8)i);
+        // Ensure HP is set to 0 to permanently enforce death even if revived
+        u16 zeroHp = 0;
+        SetMonData(mon, MON_DATA_HP, &zeroHp);
+
+        // Emit death event if it wasn't already recorded at faint event
+        if (!didFaintInBattle)
+        {
+            SoulLink_EmitEvent(SOULLINK_EVENT_FAINTED, (u8)encounterId, species, primaryType, (u8)i);
+        }
 
         // Attempt transfer to Graveyard PC Box (Box 13)
         if (gPokemonStoragePtr != NULL)
@@ -341,6 +378,8 @@ void SoulLink_ProcessFaintedMonsPostBattle(void)
     {
         CompactPartySlots();
     }
+
+    sFaintedPartyMask = 0;
 #endif
 }
 
@@ -440,18 +479,22 @@ u8 SoulLink_GetRequiredGymStageForMap(void)
 }
 
 /**
+ * Returns TRUE if the party has reached the specified gym stage.
+ */
+bool8 SoulLink_IsGymStageUnlocked(u8 stage)
+{
+    return (gSoulLink.unlockedGymStage >= stage);
+}
+
+/**
  * Script special function: CheckPartyGymUnlock
- * Returns TRUE if the party has reached the required gym stage, FALSE if blocked.
+ * Returns TRUE if the party has reached the required gym stage for the current map, FALSE if blocked.
+ * Note: Free of any stale script-variable overrides.
  */
 bool8 CheckPartyGymUnlock(void)
 {
 #if __has_include("global.h")
-    u8 req = SoulLink_GetRequiredGymStageForMap();
-    if (gSpecialVar_0x8004 != 0)
-    {
-        req = (u8)(gSpecialVar_0x8004 - 1);
-    }
-    return (gSoulLink.unlockedGymStage >= req);
+    return SoulLink_IsGymStageUnlocked(SoulLink_GetRequiredGymStageForMap());
 #else
     return TRUE;
 #endif

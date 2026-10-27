@@ -128,12 +128,14 @@ void SoulLink_ProcessOverworldCommands(void);
 void SoulLink_OnWildBattleStart(void);
 void SoulLink_OnWildCatchSuccess(u16 species);
 void SoulLink_OnWildEncounterFailed(void);
+void SoulLink_RecordFaintEvent(u8 partyIndex);
 void SoulLink_ProcessFaintedMonsPostBattle(void);
 bool8 SoulLink_IsPartyWiped(void);
 u8 SoulLink_GetLivingPokemonCount(void);
 
 // Gym progression
 bool8 CheckPartyGymUnlock(void);
+bool8 SoulLink_IsGymStageUnlocked(u8 stage);
 u8 SoulLink_GetRequiredGymStageForMap(void);
 u8 SoulLink_GetBadgeCount(void);
 void SoulLink_OnBadgeEarned(void);
