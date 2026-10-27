@@ -131,6 +131,7 @@ void SoulLink_OnWildEncounterFailed(void);
 void SoulLink_RecordFaintEvent(u8 partyIndex);
 void SoulLink_ClearFaintEvents(void);
 void SoulLink_ProcessFaintedMonsPostBattle(void);
+void SoulLink_HandleFollowerBattlePartyEnd(void);
 bool8 SoulLink_IsPartyWiped(void);
 u8 SoulLink_GetLivingPokemonCount(void);
 u32 SoulLink_GetLivingBoxPokemonCount(void);

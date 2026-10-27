@@ -510,3 +510,70 @@ TEST("SoulLink: Actual in-game flash save and restore via SaveBlock3 sectors")
     EXPECT_EQ(gSoulLink.unlockedGymStage, 3);
     EXPECT_EQ(SoulLink_GetCurrentLevelCap(), 29);
 }
+
+TEST("SoulLink: Follower NPC battle faints remap to true party slots and process before healing")
+{
+    u32 i;
+    u16 zeroHp = 0;
+
+    SoulLink_Init();
+    SoulLink_NewGame();
+    gPokemonStoragePtr = &gPokemonStorage.block;
+    ResetPokemonStorageSystem();
+
+    // Set up full 4-mon player party in gSaveBlock1Ptr->playerParty
+    for (i = 0; i < PARTY_SIZE; i++)
+        ZeroMonData(&gSaveBlock1Ptr->playerParty[i]);
+
+    CreateMon(&gSaveBlock1Ptr->playerParty[0], SPECIES_MUDKIP, 10, 0, OTID_STRUCT_PRESET(0));
+    CreateMon(&gSaveBlock1Ptr->playerParty[1], SPECIES_POOCHYENA, 8, 0, OTID_STRUCT_PRESET(0));
+    CreateMon(&gSaveBlock1Ptr->playerParty[2], SPECIES_WURMPLE, 5, 0, OTID_STRUCT_PRESET(0)); // Non-participating mon
+    CreateMon(&gSaveBlock1Ptr->playerParty[3], SPECIES_ZIGZAGOON, 7, 0, OTID_STRUCT_PRESET(0));
+
+    for (i = 0; i < 4; i++)
+        CalculateMonStats(&gSaveBlock1Ptr->playerParty[i]);
+
+    // Follower battle selects slots 0 (Mudkip), 1 (Poochyena), and 3 (Zigzagoon)
+    // Wurmple at slot 2 was NOT selected
+    gSaveBlock2Ptr->frontier.selectedPartyMons[0] = 1; // 1-based: slot 0
+    gSaveBlock2Ptr->frontier.selectedPartyMons[1] = 2; // 1-based: slot 1
+    gSaveBlock2Ptr->frontier.selectedPartyMons[2] = 4; // 1-based: slot 3
+
+    // Set up in-battle player party (reduced to 3 selected mons)
+    for (i = 0; i < PARTY_SIZE; i++)
+        ZeroMonData(&gParties[B_TRAINER_PLAYER][i]);
+
+    gParties[B_TRAINER_PLAYER][0] = gSaveBlock1Ptr->playerParty[0]; // Mudkip (HP > 0)
+    gParties[B_TRAINER_PLAYER][1] = gSaveBlock1Ptr->playerParty[1]; // Poochyena (HP > 0)
+    gParties[B_TRAINER_PLAYER][2] = gSaveBlock1Ptr->playerParty[3]; // Zigzagoon (fainted!)
+    SetMonData(&gParties[B_TRAINER_PLAYER][2], MON_DATA_HP, &zeroHp);
+
+    // Record in-battle faint event on battle slot 2 (Zigzagoon)
+    SoulLink_RecordFaintEvent(2);
+
+    // Call follower battle end handler
+    SoulLink_HandleFollowerBattlePartyEnd();
+
+    // Verify:
+    // 1. Zigzagoon (original slot 3) was moved to Graveyard Box (Box 13, spot 0)
+    EXPECT_EQ(GetBoxMonDataAt(SOULLINK_GRAVEYARD_BOX, 0, MON_DATA_SPECIES), SPECIES_ZIGZAGOON);
+
+    // 2. The player's restored party was compacted from 4 to 3 mons
+    // Slot 0: Mudkip (alive)
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_SPECIES), SPECIES_MUDKIP);
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_HP) > 0, TRUE);
+
+    // Slot 1: Poochyena (alive)
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][1], MON_DATA_SPECIES), SPECIES_POOCHYENA);
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][1], MON_DATA_HP) > 0, TRUE);
+
+    // Slot 2: Wurmple (alive! NEVER moved to Graveyard, despite being in slot 2 of original party)
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][2], MON_DATA_SPECIES), SPECIES_WURMPLE);
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][2], MON_DATA_HP) > 0, TRUE);
+
+    // Slot 3: Empty (was Zigzagoon, now compacted)
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][3], MON_DATA_SPECIES), SPECIES_NONE);
+
+    // Box 13 has only 1 mon (Zigzagoon)
+    EXPECT_EQ(GetBoxMonDataAt(SOULLINK_GRAVEYARD_BOX, 1, MON_DATA_SPECIES), SPECIES_NONE);
+}

@@ -4,6 +4,9 @@
 #include "global.h"
 #include "overworld.h"
 #include "battle.h"
+#include "battle_util.h"
+#include "follower_npc.h"
+#include "script_pokemon_util.h"
 #include "pokemon.h"
 #include "pokemon_storage_system.h"
 #include "constants/maps.h"
@@ -388,6 +391,52 @@ void SoulLink_ProcessFaintedMonsPostBattle(void)
     }
 
     sFaintedPartyMask = 0;
+#endif
+}
+
+/**
+ * Safely processes battle-end for NPC-follower partner battles (wild or trainer).
+ *
+ * In partner multi-battles where the player's team was reduced to 3 chosen mons:
+ * 1. Remaps in-battle faint indices (0..2) back to their true playerParty slots (selectedPartyMons[i] - 1).
+ * 2. Restores the full 6-mon player party via RestorePartyAfterFollowerNPCBattle().
+ * 3. Safely transfers fainted Pokémon to the Graveyard box and compacts the full party.
+ * 4. Runs automatic follower healing (HealPlayerParty()) only AFTER deaths are processed,
+ *    ensuring that Graveyard Pokémon are never healed and non-participating party mons are never killed.
+ */
+void SoulLink_HandleFollowerBattlePartyEnd(void)
+{
+#if __has_include("global.h")
+    if (!AreMultiPartiesFullTeams())
+    {
+        u8 remappedMask = 0;
+        u32 i;
+
+        for (i = 0; i < 3; i++)
+        {
+            u16 origSlot = gSaveBlock2Ptr->frontier.selectedPartyMons[i] - 1;
+            if (origSlot < PARTY_SIZE)
+            {
+                if ((sFaintedPartyMask & (1 << i)) != 0
+                 || GetMonData(&gParties[B_TRAINER_PLAYER][i], MON_DATA_HP) == 0)
+                {
+                    remappedMask |= (1 << origSlot);
+                }
+            }
+        }
+
+        RestorePartyAfterFollowerNPCBattle();
+        sFaintedPartyMask = remappedMask;
+    }
+
+    SoulLink_ProcessFaintedMonsPostBattle();
+
+    if (FNPC_FLAG_HEAL_AFTER_FOLLOWER_BATTLE != 0
+     && (FNPC_FLAG_HEAL_AFTER_FOLLOWER_BATTLE == FNPC_ALWAYS
+     || FlagGet(FNPC_FLAG_HEAL_AFTER_FOLLOWER_BATTLE)))
+    {
+        HealPlayerParty();
+    }
 #endif
 }
 

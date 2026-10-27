@@ -703,11 +703,11 @@ static void CB2_EndWildBattle(void)
 
     if (IsNPCFollowerWildBattle())
     {
-        RestorePartyAfterFollowerNPCBattle();
-        if (FNPC_FLAG_HEAL_AFTER_FOLLOWER_BATTLE != 0
-         && (FNPC_FLAG_HEAL_AFTER_FOLLOWER_BATTLE == FNPC_ALWAYS
-         || FlagGet(FNPC_FLAG_HEAL_AFTER_FOLLOWER_BATTLE)))
-            HealPlayerParty();
+        SoulLink_HandleFollowerBattlePartyEnd();
+    }
+    else
+    {
+        SoulLink_ProcessFaintedMonsPostBattle();
     }
 
     if (gBattleOutcome == B_OUTCOME_CAUGHT)
@@ -719,8 +719,6 @@ static void CB2_EndWildBattle(void)
     {
         SoulLink_OnWildEncounterFailed();
     }
-
-    SoulLink_ProcessFaintedMonsPostBattle();
 
     if (IsPlayerDefeated(gBattleOutcome) == TRUE && CurrentBattlePyramidLocation() == PYRAMID_LOCATION_NONE && !InBattlePike())
     {
@@ -1604,16 +1602,15 @@ static void HandleBattleVariantEndParty(void)
 static void CB2_EndTrainerBattle(void)
 {
     HandleBattleVariantEndParty();
-    SoulLink_ProcessFaintedMonsPostBattle();
 
     gIsDebugBattle = FALSE;
     if (FollowerNPCIsBattlePartner())
     {
-        RestorePartyAfterFollowerNPCBattle();
-        if (FNPC_FLAG_HEAL_AFTER_FOLLOWER_BATTLE != 0
-         && (FNPC_FLAG_HEAL_AFTER_FOLLOWER_BATTLE == FNPC_ALWAYS
-         || FlagGet(FNPC_FLAG_HEAL_AFTER_FOLLOWER_BATTLE)))
-            HealPlayerParty();
+        SoulLink_HandleFollowerBattlePartyEnd();
+    }
+    else
+    {
+        SoulLink_ProcessFaintedMonsPostBattle();
     }
 
     if (TRAINER_BATTLE_PARAM.earlyRival)
