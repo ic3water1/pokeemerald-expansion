@@ -15,6 +15,8 @@
 #include "event_data.h"
 #include "palette.h"
 #include "script.h"
+#include "load_save.h"
+#include "constants/species.h"
 #else
 struct MapHeader {
     u8 regionMapSectionId;
@@ -951,6 +953,11 @@ bool8 SoulLink_IsSafeOverworldState(void)
     }
 #endif
 
+    if ((gSoulLink.mailboxFlags & SOULLINK_FLAG_DEV_SAFE_OVERWORLD) != 0)
+    {
+        return TRUE;
+    }
+
 #if __has_include("global.h")
     // Note: gBattleTypeFlags is intentionally NOT checked here because the game engine
     // retains trainer battle flags even after safely returning to the overworld.
@@ -1233,6 +1240,33 @@ void SoulLink_ProcessOverworldCommands(void)
     {
         return;
     }
+
+#if __has_include("global.h")
+    if ((gSoulLink.mailboxFlags & SOULLINK_FLAG_DEV_SAFE_OVERWORLD) != 0)
+    {
+        if (gPokemonStoragePtr == NULL)
+        {
+            gPokemonStoragePtr = &gPokemonStorage.block;
+            ResetPokemonStorageSystem();
+        }
+        else if (GetBoxMonDataAt(SOULLINK_GRAVEYARD_BOX, 0, MON_DATA_SPECIES) == SPECIES_NONE &&
+                 GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_SPECIES) == SPECIES_NONE &&
+                 gSoulLink.routeState[MAPSEC_ROUTE_103] == ROUTE_STATE_OPEN)
+        {
+            ResetPokemonStorageSystem();
+        }
+
+        if (GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_SPECIES) == SPECIES_NONE &&
+            gSoulLink.routeState[MAPSEC_ROUTE_103] == ROUTE_STATE_OPEN)
+        {
+            u8 metLoc = MAPSEC_ROUTE_103;
+            CreateMon(&gParties[B_TRAINER_PLAYER][0], SPECIES_TREECKO, 10, 0xA1B2C3D4, OTID_STRUCT_PRESET(0));
+            CalculateMonStats(&gParties[B_TRAINER_PLAYER][0]);
+            SetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_MET_LOCATION, &metLoc);
+            gSoulLink.routeState[MAPSEC_ROUTE_103] = ROUTE_STATE_ALIVE;
+        }
+    }
+#endif
 
     // Drain reliable command ring buffer
     while (gSoulLink.cmdTail != gSoulLink.cmdHead)

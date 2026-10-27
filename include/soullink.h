@@ -54,6 +54,7 @@ typedef uint8_t bool8;
 #define SOULLINK_FLAG_DIRTY_STATE              (1 << 2) // Unacknowledged state changes present
 #define SOULLINK_FLAG_RECONNECT_NEEDED         (1 << 3) // Reconnection required
 #define SOULLINK_FLAG_RECONCILIATION_REQUIRED  (1 << 4) // Full state reconciliation needed on reconnect
+#define SOULLINK_FLAG_DEV_SAFE_OVERWORLD       (1 << 6) // Automated test: enables safe overworld simulation
 
 // Event flags (SoulLinkEvent.flags)
 #define SOULLINK_EVT_FLAG_CRITICAL      (1 << 0) // Cannot be dropped (deaths, forfeits, wipes)
