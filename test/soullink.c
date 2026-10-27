@@ -522,6 +522,7 @@ TEST("SoulLink: Follower NPC battle faints remap to true party slots and process
     ResetPokemonStorageSystem();
 
     // Set up full 4-mon player party in gSaveBlock1Ptr->playerParty
+    gSaveBlock1Ptr->playerPartyCount = 4;
     for (i = 0; i < PARTY_SIZE; i++)
         ZeroMonData(&gSaveBlock1Ptr->playerParty[i]);
 
@@ -532,6 +533,10 @@ TEST("SoulLink: Follower NPC battle faints remap to true party slots and process
 
     for (i = 0; i < 4; i++)
         CalculateMonStats(&gSaveBlock1Ptr->playerParty[i]);
+
+    // Zero out frontier selected party array to ensure clean test isolation
+    for (i = 0; i < MAX_FRONTIER_PARTY_SIZE; i++)
+        gSaveBlock2Ptr->frontier.selectedPartyMons[i] = 0;
 
     // Follower battle selects slots 0 (Mudkip), 1 (Poochyena), and 3 (Zigzagoon)
     // Wurmple at slot 2 was NOT selected
@@ -576,4 +581,318 @@ TEST("SoulLink: Follower NPC battle faints remap to true party slots and process
 
     // Box 13 has only 1 mon (Zigzagoon)
     EXPECT_EQ(GetBoxMonDataAt(SOULLINK_GRAVEYARD_BOX, 1, MON_DATA_SPECIES), SPECIES_NONE);
+}
+
+TEST("SoulLink: Mailbox layout, binary offsets, alignment, and total structure size assertions")
+{
+    EXPECT_EQ(sizeof(struct SoulLinkMailbox), SOULLINK_MAILBOX_TOTAL_SIZE);
+    EXPECT_EQ(sizeof(struct SoulLinkMailbox), 5088);
+    EXPECT_EQ(sizeof(struct SoulLinkEvent), 12);
+    EXPECT_EQ(sizeof(struct SoulLinkCommand), 12);
+    EXPECT_EQ(sizeof(struct SoulLinkLobbyRequest), 24);
+    EXPECT_EQ(sizeof(struct SoulLinkLobbyResponse), 36);
+    EXPECT_EQ(sizeof(struct PlayerSyncInfo), 16);
+
+    EXPECT_EQ(offsetof(struct SoulLinkMailbox, magic), SOULLINK_OFFSET_MAGIC);
+    EXPECT_EQ(offsetof(struct SoulLinkMailbox, protocolVersion), SOULLINK_OFFSET_PROTOCOL_VERSION);
+    EXPECT_EQ(offsetof(struct SoulLinkMailbox, capabilities), SOULLINK_OFFSET_CAPABILITIES);
+    EXPECT_EQ(offsetof(struct SoulLinkMailbox, transportState), SOULLINK_OFFSET_TRANSPORT_STATE);
+    EXPECT_EQ(offsetof(struct SoulLinkMailbox, mailboxFlags), SOULLINK_OFFSET_MAILBOX_FLAGS);
+    EXPECT_EQ(offsetof(struct SoulLinkMailbox, eventHead), SOULLINK_OFFSET_EVENT_HEAD);
+    EXPECT_EQ(offsetof(struct SoulLinkMailbox, eventTail), SOULLINK_OFFSET_EVENT_TAIL);
+    EXPECT_EQ(offsetof(struct SoulLinkMailbox, lastAckedEventSequenceId), SOULLINK_OFFSET_LAST_ACKED_EVENT);
+    EXPECT_EQ(offsetof(struct SoulLinkMailbox, eventDropCount), SOULLINK_OFFSET_EVENT_DROP_COUNT);
+    EXPECT_EQ(offsetof(struct SoulLinkMailbox, eventQueue), SOULLINK_OFFSET_EVENT_QUEUE);
+    EXPECT_EQ(offsetof(struct SoulLinkMailbox, cmdHead), SOULLINK_OFFSET_CMD_HEAD);
+    EXPECT_EQ(offsetof(struct SoulLinkMailbox, cmdTail), SOULLINK_OFFSET_CMD_TAIL);
+    EXPECT_EQ(offsetof(struct SoulLinkMailbox, lastExecutedCmdSequenceId), SOULLINK_OFFSET_LAST_EXEC_CMD);
+    EXPECT_EQ(offsetof(struct SoulLinkMailbox, cmdDropCount), SOULLINK_OFFSET_CMD_DROP_COUNT);
+    EXPECT_EQ(offsetof(struct SoulLinkMailbox, cmdQueue), SOULLINK_OFFSET_CMD_QUEUE);
+    EXPECT_EQ(offsetof(struct SoulLinkMailbox, lobbyRequest), SOULLINK_OFFSET_LOBBY_REQUEST);
+    EXPECT_EQ(offsetof(struct SoulLinkMailbox, lobbyResponse), SOULLINK_OFFSET_LOBBY_RESPONSE);
+    EXPECT_EQ(offsetof(struct SoulLinkMailbox, legacyOutEventType), SOULLINK_OFFSET_LEGACY_OUT_TYPE);
+    EXPECT_EQ(offsetof(struct SoulLinkMailbox, playerCount), SOULLINK_OFFSET_PLAYER_COUNT);
+    EXPECT_EQ(offsetof(struct SoulLinkMailbox, unlockedGymStage), SOULLINK_OFFSET_UNLOCKED_GYM);
+    EXPECT_EQ(offsetof(struct SoulLinkMailbox, routeState), SOULLINK_OFFSET_ROUTE_STATE);
+    EXPECT_EQ(offsetof(struct SoulLinkMailbox, routeSpecies), SOULLINK_OFFSET_ROUTE_SPECIES);
+    EXPECT_EQ(offsetof(struct SoulLinkMailbox, routeTypesMask), SOULLINK_OFFSET_ROUTE_TYPES_MASK);
+    EXPECT_EQ(offsetof(struct SoulLinkMailbox, players), SOULLINK_OFFSET_PLAYERS);
+}
+
+TEST("SoulLink: Outgoing event ring buffer FIFO ordering and bridge sequence acknowledgments")
+{
+    struct SoulLinkEvent evt;
+
+    SoulLink_Init();
+    EXPECT_EQ(SoulLink_GetPendingEventCount(), 0);
+
+    // Push 4 events
+    SoulLink_EmitEvent(SOULLINK_EVENT_CAUGHT, MAPSEC_ROUTE_101, SPECIES_TREECKO, TYPE_GRASS, 0);
+    SoulLink_EmitEvent(SOULLINK_EVENT_MAP_CHANGE, MAPSEC_ROUTE_102, 0, 0, 0);
+    SoulLink_EmitEvent(SOULLINK_EVENT_MISSED, MAPSEC_ROUTE_102, 0, 0, 0);
+    SoulLink_EmitEvent(SOULLINK_EVENT_BADGE, MAPSEC_RUSTBORO_CITY, 0, 0, 1);
+
+    EXPECT_EQ(SoulLink_GetPendingEventCount(), 4);
+
+    // Pop first event: CAUGHT Treecko
+    EXPECT_EQ(SoulLink_PopEvent(&evt), TRUE);
+    EXPECT_EQ(evt.sequenceId, 1);
+    EXPECT_EQ(evt.eventType, SOULLINK_EVENT_CAUGHT);
+    EXPECT_EQ(evt.species, SPECIES_TREECKO);
+    EXPECT_EQ(evt.mapSec, MAPSEC_ROUTE_101);
+    EXPECT_EQ(SoulLink_GetPendingEventCount(), 3);
+    EXPECT_EQ(gSoulLink.lastAckedEventSequenceId, 1);
+
+    // Pop second event: MAP_CHANGE
+    EXPECT_EQ(SoulLink_PopEvent(&evt), TRUE);
+    EXPECT_EQ(evt.sequenceId, 2);
+    EXPECT_EQ(evt.eventType, SOULLINK_EVENT_MAP_CHANGE);
+    EXPECT_EQ(evt.mapSec, MAPSEC_ROUTE_102);
+    EXPECT_EQ(SoulLink_GetPendingEventCount(), 2);
+
+    // Bridge acknowledges remaining events up to sequence 4
+    SoulLink_AcknowledgeEvents(4);
+    EXPECT_EQ(SoulLink_GetPendingEventCount(), 0);
+    EXPECT_EQ(gSoulLink.lastAckedEventSequenceId, 4);
+
+    // Empty queue pop returns FALSE
+    EXPECT_EQ(SoulLink_PopEvent(&evt), FALSE);
+}
+
+TEST("SoulLink: Multiple in-battle faints queued reliably in FIFO sequence before bridge poll")
+{
+    u32 i;
+    u8 loc1 = MAPSEC_ROUTE_101;
+    u8 loc2 = MAPSEC_ROUTE_102;
+    u8 loc3 = MAPSEC_ROUTE_103;
+    u16 zeroHp = 0;
+    struct SoulLinkEvent evt;
+
+    SoulLink_Init();
+    SoulLink_NewGame();
+
+    for (i = 0; i < PARTY_SIZE; i++)
+        ZeroMonData(&gParties[B_TRAINER_PLAYER][i]);
+
+    CreateMon(&gParties[B_TRAINER_PLAYER][0], SPECIES_TORCHIC, 10, 0, OTID_STRUCT_PRESET(0));
+    SetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_MET_LOCATION, &loc1);
+
+    CreateMon(&gParties[B_TRAINER_PLAYER][1], SPECIES_MUDKIP, 10, 0, OTID_STRUCT_PRESET(0));
+    SetMonData(&gParties[B_TRAINER_PLAYER][1], MON_DATA_MET_LOCATION, &loc2);
+
+    CreateMon(&gParties[B_TRAINER_PLAYER][2], SPECIES_TREECKO, 10, 0, OTID_STRUCT_PRESET(0));
+    SetMonData(&gParties[B_TRAINER_PLAYER][2], MON_DATA_MET_LOCATION, &loc3);
+
+    // Simulate 3 faints occurring during single battle before any bridge polling
+    SetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_HP, &zeroHp);
+    SoulLink_RecordFaintEvent(0);
+
+    SetMonData(&gParties[B_TRAINER_PLAYER][1], MON_DATA_HP, &zeroHp);
+    SoulLink_RecordFaintEvent(1);
+
+    SetMonData(&gParties[B_TRAINER_PLAYER][2], MON_DATA_HP, &zeroHp);
+    SoulLink_RecordFaintEvent(2);
+
+    // Queue must contain all 3 faint events with critical flag
+    EXPECT_EQ(SoulLink_GetPendingEventCount(), 3);
+
+    EXPECT_EQ(SoulLink_PopEvent(&evt), TRUE);
+    EXPECT_EQ(evt.eventType, SOULLINK_EVENT_FAINTED);
+    EXPECT_EQ(evt.slotIndex, 0);
+    EXPECT_EQ(evt.species, SPECIES_TORCHIC);
+    EXPECT_EQ(evt.mapSec, loc1);
+    EXPECT(evt.flags & SOULLINK_EVT_FLAG_CRITICAL);
+
+    EXPECT_EQ(SoulLink_PopEvent(&evt), TRUE);
+    EXPECT_EQ(evt.eventType, SOULLINK_EVENT_FAINTED);
+    EXPECT_EQ(evt.slotIndex, 1);
+    EXPECT_EQ(evt.species, SPECIES_MUDKIP);
+    EXPECT_EQ(evt.mapSec, loc2);
+    EXPECT(evt.flags & SOULLINK_EVT_FLAG_CRITICAL);
+
+    EXPECT_EQ(SoulLink_PopEvent(&evt), TRUE);
+    EXPECT_EQ(evt.eventType, SOULLINK_EVENT_FAINTED);
+    EXPECT_EQ(evt.slotIndex, 2);
+    EXPECT_EQ(evt.species, SPECIES_TREECKO);
+    EXPECT_EQ(evt.mapSec, loc3);
+    EXPECT(evt.flags & SOULLINK_EVT_FLAG_CRITICAL);
+
+    EXPECT_EQ(SoulLink_GetPendingEventCount(), 0);
+
+    // Verify legacy mirror held the most recent faint
+    EXPECT_EQ(gSoulLink.legacyOutEventType, SOULLINK_EVENT_FAINTED);
+    EXPECT_EQ(gSoulLink.legacyOutSlotIndex, 2);
+
+    SoulLink_ClearFaintEvents();
+}
+
+TEST("SoulLink: Event queue-full handling drops non-critical events and protects critical deaths")
+{
+    u32 i;
+    struct SoulLinkEvent evt;
+
+    SoulLink_Init();
+    EXPECT_EQ(SoulLink_GetPendingEventCount(), 0);
+
+    // Fill queue with 16 non-critical events (e.g. MAP_CHANGE)
+    for (i = 0; i < SOULLINK_EVENT_QUEUE_SIZE; i++)
+    {
+        bool8 pushed = SoulLink_PushEvent(SOULLINK_EVENT_MAP_CHANGE, (u8)i, 0, 0, 0, 0);
+        EXPECT_EQ(pushed, TRUE);
+    }
+    EXPECT_EQ(SoulLink_GetPendingEventCount(), 16);
+    EXPECT_EQ(SoulLink_GetEventDropCount(), 0);
+
+    // 17th non-critical event must be DROPPED
+    bool8 dropPushed = SoulLink_PushEvent(SOULLINK_EVENT_MAP_CHANGE, 99, 0, 0, 0, 0);
+    EXPECT_EQ(dropPushed, FALSE);
+    EXPECT_EQ(SoulLink_GetEventDropCount(), 1);
+    EXPECT_EQ(SoulLink_GetPendingEventCount(), 16);
+    EXPECT(gSoulLink.mailboxFlags & SOULLINK_FLAG_QUEUE_OVERFLOW);
+
+    // A CRITICAL event (e.g. FAINTED) must NEVER be discarded even when queue is full!
+    bool8 critPushed = SoulLink_PushEvent(SOULLINK_EVENT_FAINTED, MAPSEC_ROUTE_104, SPECIES_PIKACHU, TYPE_ELECTRIC, 0, SOULLINK_EVT_FLAG_CRITICAL);
+    EXPECT_EQ(critPushed, TRUE);
+    EXPECT_EQ(SoulLink_GetPendingEventCount(), 16); // Tail advanced to accommodate critical event
+    EXPECT(gSoulLink.mailboxFlags & SOULLINK_FLAG_CRITICAL_OVERFLOW);
+    EXPECT(gSoulLink.mailboxFlags & SOULLINK_FLAG_DIRTY_STATE);
+
+    // Drain events to verify the critical event is safely stored at the tail
+    for (i = 0; i < 15; i++)
+    {
+        EXPECT_EQ(SoulLink_PopEvent(&evt), TRUE);
+    }
+    EXPECT_EQ(SoulLink_PopEvent(&evt), TRUE);
+    EXPECT_EQ(evt.eventType, SOULLINK_EVENT_FAINTED);
+    EXPECT_EQ(evt.species, SPECIES_PIKACHU);
+    EXPECT_EQ(evt.mapSec, MAPSEC_ROUTE_104);
+}
+
+TEST("SoulLink: 16-bit sequence number wraparound across 65535 skips 0 and preserves order")
+{
+    struct SoulLinkEvent evt;
+
+    SoulLink_Init();
+    SoulLink_TestSetNextEventSequenceId(65534);
+
+    SoulLink_EmitEvent(SOULLINK_EVENT_MAP_CHANGE, 1, 0, 0, 0);
+    SoulLink_EmitEvent(SOULLINK_EVENT_MAP_CHANGE, 2, 0, 0, 0);
+    SoulLink_EmitEvent(SOULLINK_EVENT_MAP_CHANGE, 3, 0, 0, 0);
+    SoulLink_EmitEvent(SOULLINK_EVENT_MAP_CHANGE, 4, 0, 0, 0);
+
+    EXPECT_EQ(SoulLink_GetPendingEventCount(), 4);
+
+    EXPECT_EQ(SoulLink_PopEvent(&evt), TRUE);
+    EXPECT_EQ(evt.sequenceId, 65534);
+
+    EXPECT_EQ(SoulLink_PopEvent(&evt), TRUE);
+    EXPECT_EQ(evt.sequenceId, 65535);
+
+    // Sequence ID 0 must be skipped on 16-bit wraparound
+    EXPECT_EQ(SoulLink_PopEvent(&evt), TRUE);
+    EXPECT_EQ(evt.sequenceId, 1);
+
+    EXPECT_EQ(SoulLink_PopEvent(&evt), TRUE);
+    EXPECT_EQ(evt.sequenceId, 2);
+
+    EXPECT_EQ(SoulLink_GetPendingEventCount(), 0);
+}
+
+TEST("SoulLink: Incoming command ring buffer deferred in battle and executed in overworld")
+{
+    struct SoulLinkCommand cmd1 = {0};
+    struct SoulLinkCommand cmd2 = {0};
+
+    SoulLink_Init();
+    SoulLink_NewGame();
+
+    cmd1.sequenceId = 101;
+    cmd1.cmdType = SOULLINK_CMD_LOCK_ROUTE;
+    cmd1.targetMapSec = MAPSEC_ROUTE_105;
+
+    cmd2.sequenceId = 102;
+    cmd2.cmdType = SOULLINK_CMD_UNLOCK_GYM;
+    cmd2.targetMapSec = 0;
+
+    EXPECT_EQ(SoulLink_ReceiveCommand(&cmd1), TRUE);
+    EXPECT_EQ(SoulLink_ReceiveCommand(&cmd2), TRUE);
+    EXPECT_EQ(SoulLink_GetPendingCommandCount(), 2);
+
+    // Simulate in-battle state: execution must be deferred
+    gBattleTypeFlags = BATTLE_TYPE_TRAINER;
+    SoulLink_ProcessOverworldCommands();
+
+    // Commands must remain untouched in buffer
+    EXPECT_EQ(SoulLink_GetPendingCommandCount(), 2);
+    EXPECT_EQ(gSoulLink.routeState[MAPSEC_ROUTE_105], ROUTE_STATE_OPEN);
+    EXPECT_EQ(gSoulLink.unlockedGymStage, 0);
+
+    // Return to overworld: execution proceeds safely
+    gBattleTypeFlags = 0;
+    SoulLink_ProcessOverworldCommands();
+
+    EXPECT_EQ(SoulLink_GetPendingCommandCount(), 0);
+    EXPECT_EQ(gSoulLink.routeState[MAPSEC_ROUTE_105], ROUTE_STATE_DEAD_FORFEITED);
+    EXPECT_EQ(gSoulLink.unlockedGymStage, 1);
+    EXPECT_EQ(gSoulLink.lastExecutedCmdSequenceId, cmd2.sequenceId);
+}
+
+TEST("SoulLink: Malformed and unknown commands are safely ignored without memory corruption")
+{
+    struct SoulLinkCommand malformed = {0};
+
+    SoulLink_Init();
+    SoulLink_NewGame();
+
+    malformed.sequenceId = 201;
+    malformed.cmdType = 99; // Unknown op
+    malformed.targetMapSec = 250; // Out-of-bounds mapSec
+
+    EXPECT_EQ(SoulLink_ReceiveCommand(&malformed), TRUE);
+    EXPECT_EQ(SoulLink_GetPendingCommandCount(), 1);
+
+    gBattleTypeFlags = 0;
+    SoulLink_ProcessOverworldCommands();
+
+    // Command queue must be safely drained without crash or corrupted route state
+    EXPECT_EQ(SoulLink_GetPendingCommandCount(), 0);
+    EXPECT_EQ(gSoulLink.lastExecutedCmdSequenceId, malformed.sequenceId);
+}
+
+TEST("SoulLink: Offline safety and missing bridge behavior returns ERR_NO_BRIDGE immediately")
+{
+    SoulLink_Init();
+    EXPECT_EQ(SoulLink_GetTransportState(), SOULLINK_TRANSPORT_OFFLINE);
+
+    // Create lobby request
+    SoulLink_LobbyRequestCreate(4);
+    EXPECT_EQ(gSoulLink.lobbyRequest.opCode, SOULLINK_LOBBY_OP_CREATE);
+    EXPECT_EQ(gSoulLink.lobbyRequest.maxPlayers, 4);
+    EXPECT_EQ(gSoulLink.lobbyResponse.ackRequestId, gSoulLink.lobbyRequest.requestId);
+    EXPECT_EQ(gSoulLink.lobbyResponse.responseCode, SOULLINK_RESP_ERR_NO_BRIDGE);
+
+    // Join lobby request
+    SoulLink_LobbyRequestJoin((const u8 *)"ROOM123");
+    EXPECT_EQ(gSoulLink.lobbyRequest.opCode, SOULLINK_LOBBY_OP_JOIN);
+    EXPECT_EQ(gSoulLink.lobbyResponse.ackRequestId, gSoulLink.lobbyRequest.requestId);
+    EXPECT_EQ(gSoulLink.lobbyResponse.responseCode, SOULLINK_RESP_ERR_NO_BRIDGE);
+
+    // Ready lobby request
+    SoulLink_LobbyRequestReady(TRUE);
+    EXPECT_EQ(gSoulLink.lobbyRequest.opCode, SOULLINK_LOBBY_OP_READY);
+    EXPECT_EQ(gSoulLink.lobbyResponse.ackRequestId, gSoulLink.lobbyRequest.requestId);
+    EXPECT_EQ(gSoulLink.lobbyResponse.responseCode, SOULLINK_RESP_ERR_NO_BRIDGE);
+
+    // Start run request
+    SoulLink_LobbyRequestStartRun();
+    EXPECT_EQ(gSoulLink.lobbyRequest.opCode, SOULLINK_LOBBY_OP_START_RUN);
+    EXPECT_EQ(gSoulLink.lobbyResponse.ackRequestId, gSoulLink.lobbyRequest.requestId);
+    EXPECT_EQ(gSoulLink.lobbyResponse.responseCode, SOULLINK_RESP_ERR_NO_BRIDGE);
+
+    // When bridge connects, state transitions and requests become PENDING
+    SoulLink_SetTransportState(SOULLINK_TRANSPORT_CONNECTED);
+    EXPECT_EQ(SoulLink_GetTransportState(), SOULLINK_TRANSPORT_CONNECTED);
+
+    SoulLink_LobbyRequestCreate(2);
+    EXPECT_EQ(gSoulLink.lobbyResponse.responseCode, SOULLINK_RESP_PENDING);
 }
