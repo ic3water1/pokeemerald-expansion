@@ -1072,6 +1072,7 @@ static void CB2_EndFirstBattle(void)
 {
     Overworld_ClearSavedMusic();
     DowngradeBadPoison();
+    SoulLink_ClearFaintEvents();
     SetMainCallback2(CB2_ReturnToFieldContinueScriptPlayMapMusic);
 }
 
@@ -1603,6 +1604,7 @@ static void HandleBattleVariantEndParty(void)
 static void CB2_EndTrainerBattle(void)
 {
     HandleBattleVariantEndParty();
+    SoulLink_ProcessFaintedMonsPostBattle();
 
     gIsDebugBattle = FALSE;
     if (FollowerNPCIsBattlePartner())
@@ -1644,7 +1646,6 @@ static void CB2_EndTrainerBattle(void)
     }
     else if (IsPlayerDefeated(gBattleOutcome))
     {
-        SoulLink_ProcessFaintedMonsPostBattle();
         if (CurrentBattlePyramidLocation() != PYRAMID_LOCATION_NONE || InTrainerHillChallenge() || FlagGet(B_FLAG_NO_WHITEOUT))
             SetMainCallback2(CB2_ReturnToFieldContinueScriptPlayMapMusic);
         else
@@ -1652,7 +1653,6 @@ static void CB2_EndTrainerBattle(void)
     }
     else
     {
-        SoulLink_ProcessFaintedMonsPostBattle();
         SetMainCallback2(CB2_ReturnToFieldContinueScriptPlayMapMusic);
         DowngradeBadPoison();
         if (CurrentBattlePyramidLocation() == PYRAMID_LOCATION_NONE && !InTrainerHillChallenge())

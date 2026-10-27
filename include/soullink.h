@@ -129,9 +129,12 @@ void SoulLink_OnWildBattleStart(void);
 void SoulLink_OnWildCatchSuccess(u16 species);
 void SoulLink_OnWildEncounterFailed(void);
 void SoulLink_RecordFaintEvent(u8 partyIndex);
+void SoulLink_ClearFaintEvents(void);
 void SoulLink_ProcessFaintedMonsPostBattle(void);
 bool8 SoulLink_IsPartyWiped(void);
 u8 SoulLink_GetLivingPokemonCount(void);
+u32 SoulLink_GetLivingBoxPokemonCount(void);
+u32 SoulLink_GetTotalUsablePokemonCount(void);
 
 // Gym progression
 bool8 CheckPartyGymUnlock(void);

@@ -4,6 +4,7 @@
 #include "pokemon_storage_system.h"
 #include "event_data.h"
 #include "load_save.h"
+#include "save.h"
 #include "soullink.h"
 #include "test/test.h"
 #include "constants/maps.h"
@@ -331,21 +332,181 @@ TEST("SoulLink: Record permanent death at actual faint event and prevent revive 
     EXPECT_EQ(GetBoxMonDataAt(SOULLINK_GRAVEYARD_BOX, 0, MON_DATA_HP), 0);
 }
 
-TEST("SoulLink: Graveyard PC storage blocks multi-selection operations")
+TEST("SoulLink: Graveyard PC storage blocks multi-selection operations with active group")
 {
+    struct Pokemon mon1, mon2;
     SoulLink_Init();
     gPokemonStoragePtr = &gPokemonStorage.block;
     ResetPokemonStorageSystem();
 
-    // Set storage to Graveyard box
-    SetCurrentBox(SOULLINK_GRAVEYARD_BOX);
-    EXPECT_EQ(StorageGetCurrentBox(), SOULLINK_GRAVEYARD_BOX);
+    CreateMon(&mon1, SPECIES_POOCHYENA, 5, 0, OTID_STRUCT_PRESET(0));
+    CreateMon(&mon2, SPECIES_ZIGZAGOON, 5, 0, OTID_STRUCT_PRESET(0));
 
-    // MultiMove_CanPlaceSelection must return FALSE when in Graveyard box
-    EXPECT_EQ(MultiMove_CanPlaceSelection(), FALSE);
+    // Setup an actual active multi-selection group of 2 Pokémon spanning columns 0-1, row 0
+    Test_SetupMultiMoveSelection(0, 0, 2, 1, &mon1.box, &mon2.box);
 
-    // Normal box 0 with no active multimove
+    // In normal Box 0 with empty spots: MultiMove_CanPlaceSelection must return TRUE
     SetCurrentBox(0);
     EXPECT_EQ(StorageGetCurrentBox(), 0);
+    EXPECT_EQ(MultiMove_CanPlaceSelection(), TRUE);
+
+    // In Graveyard Box (Box 13): MultiMove_CanPlaceSelection must return FALSE even with empty spots!
+    SetCurrentBox(SOULLINK_GRAVEYARD_BOX);
+    EXPECT_EQ(StorageGetCurrentBox(), SOULLINK_GRAVEYARD_BOX);
     EXPECT_EQ(MultiMove_CanPlaceSelection(), FALSE);
+
+    // Attempting to place into Graveyard box is blocked
+    MultiMove_SetPlacedMonData();
+    EXPECT_EQ(GetBoxMonDataAt(SOULLINK_GRAVEYARD_BOX, 0, MON_DATA_SANITY_HAS_SPECIES), FALSE);
+    EXPECT_EQ(GetBoxMonDataAt(SOULLINK_GRAVEYARD_BOX, 1, MON_DATA_SANITY_HAS_SPECIES), FALSE);
+
+    Test_TeardownMultiMove();
+}
+
+TEST("SoulLink: Early rival battles and battle callbacks process faint events exactly once")
+{
+    u8 metLoc = MAPSEC_ROUTE_103;
+    u16 zeroHp = 0;
+
+    SoulLink_Init();
+    SoulLink_NewGame();
+    gPokemonStoragePtr = &gPokemonStorage.block;
+    ResetPokemonStorageSystem();
+
+    gSoulLink.routeState[metLoc] = ROUTE_STATE_ALIVE;
+
+    // Party with 1 Treecko in slot 0
+    ZeroMonData(&gParties[B_TRAINER_PLAYER][0]);
+    CreateMon(&gParties[B_TRAINER_PLAYER][0], SPECIES_TREECKO, 5, 0, OTID_STRUCT_PRESET(0));
+    CalculateMonStats(&gParties[B_TRAINER_PLAYER][0]);
+    SetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_MET_LOCATION, &metLoc);
+
+    // Treecko faints during early rival battle
+    SoulLink_RecordFaintEvent(0);
+    SetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_HP, &zeroHp);
+
+    // Post-battle processing executes
+    SoulLink_ProcessFaintedMonsPostBattle();
+
+    // Death was processed and route is dead
+    EXPECT_EQ(gSoulLink.routeState[metLoc], ROUTE_STATE_DEAD_FORFEITED);
+    EXPECT_EQ(GetBoxMonDataAt(SOULLINK_GRAVEYARD_BOX, 0, MON_DATA_SPECIES), SPECIES_TREECKO);
+
+    // Mask is now 0. Setup an unrelated new battle with a fresh Pokemon in slot 0
+    ZeroMonData(&gParties[B_TRAINER_PLAYER][0]);
+    CreateMon(&gParties[B_TRAINER_PLAYER][0], SPECIES_MUDKIP, 5, 0, OTID_STRUCT_PRESET(0));
+    CalculateMonStats(&gParties[B_TRAINER_PLAYER][0]);
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_HP) > 0, TRUE);
+
+    // Calling post-battle processing on unrelated battle MUST NOT kill Mudkip
+    SoulLink_ProcessFaintedMonsPostBattle();
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_SPECIES), SPECIES_MUDKIP);
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_HP) > 0, TRUE);
+
+    // ClearFaintEvents guarantees safe battle init
+    SoulLink_RecordFaintEvent(0);
+    SoulLink_ClearFaintEvents();
+    SoulLink_ProcessFaintedMonsPostBattle();
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_SPECIES), SPECIES_MUDKIP);
+}
+
+TEST("SoulLink: Usable Pokemon count across party and PC handles party wipes safely")
+{
+    u32 i;
+    struct Pokemon boxedMon;
+
+    SoulLink_Init();
+    SoulLink_NewGame();
+    gPokemonStoragePtr = &gPokemonStorage.block;
+    ResetPokemonStorageSystem();
+
+    for (i = 0; i < PARTY_SIZE; i++)
+        ZeroMonData(&gParties[B_TRAINER_PLAYER][i]);
+
+    // Initial state: 0 in party, 0 in PC
+    EXPECT_EQ(SoulLink_GetLivingPokemonCount(), 0);
+    EXPECT_EQ(SoulLink_GetLivingBoxPokemonCount(), 0);
+    EXPECT_EQ(SoulLink_GetTotalUsablePokemonCount(), 0);
+    EXPECT_EQ(SoulLink_IsPartyWiped(), TRUE);
+
+    // Add 1 boxed Pokemon in normal Box 0
+    CreateMon(&boxedMon, SPECIES_ZIGZAGOON, 5, 0, OTID_STRUCT_PRESET(0));
+    SetBoxMonAt(0, 0, &boxedMon.box);
+
+    EXPECT_EQ(SoulLink_GetLivingPokemonCount(), 0);
+    EXPECT_EQ(SoulLink_GetLivingBoxPokemonCount(), 1);
+    EXPECT_EQ(SoulLink_GetTotalUsablePokemonCount(), 1);
+
+    // Pokémon in Graveyard box (Box 13) must NOT be counted as living/usable
+    SetBoxMonAt(SOULLINK_GRAVEYARD_BOX, 0, &boxedMon.box);
+    EXPECT_EQ(SoulLink_GetLivingBoxPokemonCount(), 1); // Still 1 from Box 0
+
+    // Add 1 party Pokemon
+    CreateMon(&gParties[B_TRAINER_PLAYER][0], SPECIES_TREECKO, 5, 0, OTID_STRUCT_PRESET(0));
+    CalculateMonStats(&gParties[B_TRAINER_PLAYER][0]);
+    EXPECT_EQ(SoulLink_GetLivingPokemonCount(), 1);
+    EXPECT_EQ(SoulLink_GetTotalUsablePokemonCount(), 2);
+    EXPECT_EQ(SoulLink_IsPartyWiped(), FALSE);
+}
+
+TEST("SoulLink: Actual in-game flash save and restore via SaveBlock3 sectors")
+{
+    SoulLink_Init();
+    SoulLink_NewGame();
+    gPokemonStoragePtr = &gPokemonStorage.block;
+    ResetPokemonStorageSystem();
+
+    // Populate distinct Nuzlocke state
+    gSoulLink.routeState[MAPSEC_ROUTE_101] = ROUTE_STATE_ALIVE;
+    gSoulLink.routeSpecies[MAPSEC_ROUTE_101][0] = SPECIES_POOCHYENA;
+    gSoulLink.routeTypesMask[MAPSEC_ROUTE_101] = SOULLINK_TYPE_BIT(TYPE_DARK);
+
+    gSoulLink.routeState[MAPSEC_ROUTE_102] = ROUTE_STATE_DEAD_FORFEITED;
+    gSoulLink.routeSpecies[MAPSEC_ROUTE_102][0] = SPECIES_ZIGZAGOON;
+    gSoulLink.routeTypesMask[MAPSEC_ROUTE_102] = SOULLINK_TYPE_BIT(TYPE_NORMAL);
+
+    gSoulLink.routeState[ENCOUNTER_ID_ROUTE_104_NORTH] = ROUTE_STATE_ALIVE;
+    gSoulLink.routeSpecies[ENCOUNTER_ID_ROUTE_104_NORTH][0] = SPECIES_TAILLOW;
+    gSoulLink.routeTypesMask[ENCOUNTER_ID_ROUTE_104_NORTH] = SOULLINK_TYPE_BIT(TYPE_NORMAL) | SOULLINK_TYPE_BIT(TYPE_FLYING);
+
+    gSoulLink.unlockedGymStage = 3;
+
+    // Detect flash memory in emulator
+    CheckForFlashMemory();
+    EXPECT_EQ(gFlashMemoryPresent, TRUE);
+
+    // Perform standard in-game flash save (writes to all 14 flash sectors)
+    Save_ResetSaveCounters();
+    u8 saveStatus = TrySavingData(SAVE_NORMAL);
+    EXPECT_EQ(saveStatus, SAVE_STATUS_OK);
+
+    // Completely wipe gSoulLink, SaveBlock3, and RAM save locations
+    memset(&gSoulLink, 0, sizeof(gSoulLink));
+    memset(&gSaveblock3, 0, sizeof(gSaveblock3));
+    EXPECT_EQ(gSoulLink.magic, 0);
+    EXPECT_EQ(gSoulLink.unlockedGymStage, 0);
+    EXPECT_EQ(gSoulLink.routeState[MAPSEC_ROUTE_101], 0);
+
+    // Re-initialize boot state (without NewGame wipe)
+    SoulLink_Init();
+    EXPECT_EQ(gSoulLink.magic, SOULLINK_MAGIC);
+
+    // Load game from flash memory (reads all 14 flash sectors)
+    u8 loadStatus = LoadGameSave(SAVE_NORMAL);
+    EXPECT_EQ(loadStatus, SAVE_STATUS_OK);
+
+    // Verify all encounters, deaths, and Gym progression were restored from flash
+    EXPECT_EQ(gSoulLink.routeState[MAPSEC_ROUTE_101], ROUTE_STATE_ALIVE);
+    EXPECT_EQ(gSoulLink.routeSpecies[MAPSEC_ROUTE_101][0], SPECIES_POOCHYENA);
+    EXPECT(gSoulLink.routeTypesMask[MAPSEC_ROUTE_101] & SOULLINK_TYPE_BIT(TYPE_DARK));
+
+    EXPECT_EQ(gSoulLink.routeState[MAPSEC_ROUTE_102], ROUTE_STATE_DEAD_FORFEITED);
+    EXPECT_EQ(gSoulLink.routeSpecies[MAPSEC_ROUTE_102][0], SPECIES_ZIGZAGOON);
+
+    EXPECT_EQ(gSoulLink.routeState[ENCOUNTER_ID_ROUTE_104_NORTH], ROUTE_STATE_ALIVE);
+    EXPECT_EQ(gSoulLink.routeSpecies[ENCOUNTER_ID_ROUTE_104_NORTH][0], SPECIES_TAILLOW);
+    EXPECT(gSoulLink.routeTypesMask[ENCOUNTER_ID_ROUTE_104_NORTH] & SOULLINK_TYPE_BIT(TYPE_FLYING));
+
+    EXPECT_EQ(gSoulLink.unlockedGymStage, 3);
+    EXPECT_EQ(SoulLink_GetCurrentLevelCap(), 29);
 }

@@ -22,6 +22,7 @@
 #include "script.h"
 #include "tv.h"
 #include "wild_encounter.h"
+#include "soullink.h"
 #include "battle_debug.h"
 #include "battle_pike.h"
 #include "battle_pyramid.h"
@@ -669,6 +670,9 @@ bool8 StandardWildEncounter(u16 curMetatileBehavior, u16 prevMetatileBehavior)
     struct Roamer *roamer;
 
     if (sWildEncountersDisabled == TRUE)
+        return FALSE;
+
+    if (CalculatePlayerPartyCount() == 0 || SoulLink_GetLivingPokemonCount() == 0)
         return FALSE;
 
     headerId = GetCurrentMapWildMonHeaderId();

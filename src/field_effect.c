@@ -1270,6 +1270,14 @@ static void SpriteCB_PokeballGlowEffect(struct Sprite *sprite)
 static void PokeballGlowEffect_PlaceBalls(struct Sprite *sprite)
 {
     u8 spriteId;
+
+    if (sprite->sNumMons <= 0)
+    {
+        sprite->sTimer = 32;
+        sprite->sState++;
+        return;
+    }
+
     if (sprite->sTimer == 0 || (--sprite->sTimer) == 0)
     {
         sprite->sTimer = 25;

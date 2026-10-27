@@ -48,6 +48,7 @@
 #include "recorded_battle.h"
 #include "roamer.h"
 #include "safari_zone.h"
+#include "soullink.h"
 #include "scanline_effect.h"
 #include "script.h"
 #include "sound.h"
@@ -471,6 +472,7 @@ const u8 *const gStatusConditionStringsTable[][2] =
 
 void CB2_InitBattle(void)
 {
+    SoulLink_ClearFaintEvents();
     if (!(gBattleTypeFlags & BATTLE_TYPE_RECORDED))
         MoveSaveBlocks_ResetHeap();
     AllocateBattleResources();

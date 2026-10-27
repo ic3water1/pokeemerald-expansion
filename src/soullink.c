@@ -303,6 +303,14 @@ void SoulLink_RecordFaintEvent(u8 partyIndex)
 }
 
 /**
+ * Clears any pending battle faint events so they never carry into subsequent battles.
+ */
+void SoulLink_ClearFaintEvents(void)
+{
+    sFaintedPartyMask = 0;
+}
+
+/**
  * Processes fainted party members upon return to overworld.
  * Moves fainted Pokémon safely to the Graveyard box (Box 14), marks routes dead, and emits events.
  * Handles both Pokémon with 0 HP and those recorded in sFaintedPartyMask (preventing revive bypass).
@@ -424,6 +432,44 @@ u8 SoulLink_GetLivingPokemonCount(void)
     }
 #endif
     return count;
+}
+
+/**
+ * Counts total living usable Pokémon currently stored across non-Graveyard PC boxes.
+ */
+u32 SoulLink_GetLivingBoxPokemonCount(void)
+{
+    u32 count = 0;
+#if __has_include("global.h")
+    if (gPokemonStoragePtr != NULL)
+    {
+        s32 boxId, boxPos;
+        for (boxId = 0; boxId < TOTAL_BOXES_COUNT; boxId++)
+        {
+            if (boxId == SOULLINK_GRAVEYARD_BOX)
+                continue;
+
+            for (boxPos = 0; boxPos < IN_BOX_COUNT; boxPos++)
+            {
+                struct BoxPokemon *boxMon = &gPokemonStoragePtr->boxes[boxId][boxPos];
+                u16 species = GetBoxMonData(boxMon, MON_DATA_SPECIES_OR_EGG);
+                if (species != SPECIES_NONE && species != SPECIES_EGG)
+                {
+                    count++;
+                }
+            }
+        }
+    }
+#endif
+    return count;
+}
+
+/**
+ * Returns total usable Pokémon available to the player across both Party and PC Storage.
+ */
+u32 SoulLink_GetTotalUsablePokemonCount(void)
+{
+    return (u32)SoulLink_GetLivingPokemonCount() + SoulLink_GetLivingBoxPokemonCount();
 }
 
 /**

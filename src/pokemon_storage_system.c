@@ -689,7 +689,11 @@ static void MultiMove_InitMove(u16, u16, u16);
 static void MultiMove_GetMonsFromSelection(void);
 static void MultiMove_RemoveMonsFromBox(void);
 static void MultiMove_CreatePlacedMonIcons(void);
+#if TESTING
+void MultiMove_SetPlacedMonData(void);
+#else
 static void MultiMove_SetPlacedMonData(void);
+#endif
 static u8 MultiMove_UpdateMove(void);
 static void MultiMove_DeselectRow(u8, u8, u8);
 static void MultiMove_SelectRow(u8, u8, u8);
@@ -1562,7 +1566,7 @@ static void Task_PCMainMenu(u8 taskId)
                 AddTextPrinterParameterized2(0, FONT_NORMAL, gText_PartyFull, 0, NULL, TEXT_COLOR_DARK_GRAY, TEXT_COLOR_WHITE, TEXT_COLOR_LIGHT_GRAY);
                 task->tState = STATE_ERROR_MSG;
             }
-            else if (task->tInput == OPTION_DEPOSIT && CountPartyMons() == 1)
+            else if (task->tInput == OPTION_DEPOSIT && CountPartyMons() <= 1)
             {
                 // Can't deposit
                 FillWindowPixelBuffer(0, PIXEL_FILL(1));
@@ -6847,7 +6851,7 @@ static void InitSummaryScreenData(void)
     {
         sStorage->summaryMon.mon = gParties[B_TRAINER_PLAYER];
         sStorage->summaryStartPos = sCursorPosition;
-        sStorage->summaryMaxPos = CountPartyMons() - 1;
+        sStorage->summaryMaxPos = (CountPartyMons() > 0) ? CountPartyMons() - 1 : 0;
         sStorage->summaryScreenMode = SUMMARY_MODE_NORMAL;
     }
     else
@@ -8746,13 +8750,26 @@ static void MultiMove_CreatePlacedMonIcons(void)
     }
 }
 
+#if TESTING
+void MultiMove_SetPlacedMonData(void)
+#else
 static void MultiMove_SetPlacedMonData(void)
+#endif
 {
     s32 i, j;
-    s32 columnCount = sMultiMove->minColumn + sMultiMove->columnsTotal;
-    s32 rowCount = sMultiMove->minRow + sMultiMove->rowsTotal;
+    s32 columnCount;
+    s32 rowCount;
     u8 boxId = StorageGetCurrentBox();
     u8 monArrayId = 0;
+
+    if (boxId == SOULLINK_GRAVEYARD_BOX)
+        return;
+
+    if (sMultiMove == NULL)
+        return;
+
+    columnCount = sMultiMove->minColumn + sMultiMove->columnsTotal;
+    rowCount = sMultiMove->minRow + sMultiMove->rowsTotal;
 
     for (i = sMultiMove->minRow; i < rowCount; i++)
     {
@@ -8816,6 +8833,31 @@ bool8 MultiMove_CanPlaceSelection(void)
     return TRUE;
 }
 
+#if TESTING
+void Test_SetupMultiMoveSelection(u8 minCol, u8 minRow, u8 cols, u8 rows, struct BoxPokemon *mon1, struct BoxPokemon *mon2)
+{
+    if (sMultiMove == NULL)
+        sMultiMove = AllocZeroed(sizeof(*sMultiMove));
+
+    sMultiMove->minColumn = minCol;
+    sMultiMove->minRow = minRow;
+    sMultiMove->columnsTotal = cols;
+    sMultiMove->rowsTotal = rows;
+    if (mon1 != NULL)
+        sMultiMove->boxMons[0] = *mon1;
+    if (mon2 != NULL)
+        sMultiMove->boxMons[1] = *mon2;
+}
+
+void Test_TeardownMultiMove(void)
+{
+    if (sMultiMove != NULL)
+    {
+        Free(sMultiMove);
+        sMultiMove = NULL;
+    }
+}
+#endif
 
 //------------------------------------------------------------------------------
 //  SECTION: Item mode
