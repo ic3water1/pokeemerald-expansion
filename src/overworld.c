@@ -61,6 +61,7 @@
 #include "script_pokemon_util.h"
 #include "secret_base.h"
 #include "sound.h"
+#include "soullink.h"
 #include "sprite.h"
 #include "start_menu.h"
 #include "string_util.h"
@@ -1875,6 +1876,7 @@ static void OverworldBasic(void)
         }
     }
     UpdateOverworldWildEncounter();
+    SoulLink_ProcessOverworldCommands();
 }
 
 // This CB2 is used when starting

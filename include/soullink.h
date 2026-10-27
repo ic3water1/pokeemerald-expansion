@@ -30,9 +30,49 @@ typedef uint8_t bool8;
 // Magic header for mGBA Lua bridge detection in EWRAM ("SOUL" in ASCII little-endian)
 #define SOULLINK_MAGIC 0x4C554F53
 
+/**
+ * Protocol version (Phase 3: Versioned Mailbox Contract)
+ *
+ * BREAKING CHANGE NOTICE:
+ * Protocol Version 1 redesigns the mailbox layout starting at offset 0x0004 with protocolVersion,
+ * replacing the legacy Phase 1/Phase 2 single-slot memory polling mechanism with reliable ring buffers.
+ * Legacy memory readers that directly poll offset 0x0004 for single-slot events are binary-incompatible
+ * and must be upgraded to support Protocol Version 1.
+ */
+#define SOULLINK_PROTOCOL_VERSION 1
+
+// Capability flags (bitmask in mailbox.capabilities)
+#define SOULLINK_CAP_EVENT_QUEUE       (1 << 0)
+#define SOULLINK_CAP_CMD_QUEUE         (1 << 1)
+#define SOULLINK_CAP_LOBBY_MANAGEMENT  (1 << 2)
+#define SOULLINK_CAP_RECONNECT_TOKEN   (1 << 3)
+#define SOULLINK_CAP_STABLE_ENCOUNTERS (1 << 4)
+
+// Mailbox status & overflow flags (mailbox.mailboxFlags)
+#define SOULLINK_FLAG_QUEUE_OVERFLOW           (1 << 0) // Non-critical event dropped
+#define SOULLINK_FLAG_CRITICAL_OVERFLOW        (1 << 1) // Critical event overflow occurred
+#define SOULLINK_FLAG_DIRTY_STATE              (1 << 2) // Unacknowledged state changes present
+#define SOULLINK_FLAG_RECONNECT_NEEDED         (1 << 3) // Reconnection required
+#define SOULLINK_FLAG_RECONCILIATION_REQUIRED  (1 << 4) // Full state reconciliation needed on reconnect
+
+// Event flags (SoulLinkEvent.flags)
+#define SOULLINK_EVT_FLAG_CRITICAL      (1 << 0) // Cannot be dropped (deaths, forfeits, wipes)
+#define SOULLINK_EVT_FLAG_REPLAY        (1 << 1) // Replayed event for catch-up
+
+// Command flags (SoulLinkCommand.flags)
+#define SOULLINK_CMD_FLAG_CRITICAL      (1 << 0)
+#define SOULLINK_CMD_FLAG_APPLIED       (1 << 1)
+
 #define MAX_PLAYERS 8
 #define NUM_MAPSECS 213 // Total trackable route/location IDs in Hoenn
 #define PLAYER_NAME_LEN 8
+
+#define SOULLINK_EVENT_QUEUE_SIZE 16
+#define SOULLINK_CMD_QUEUE_SIZE   16
+#define SOULLINK_QUEUE_MASK       15
+
+#define SOULLINK_ROOM_CODE_LEN     8
+#define SOULLINK_SESSION_TOKEN_LEN 8
 
 // Graveyard Box: Box 14 (0-indexed 13)
 #define SOULLINK_GRAVEYARD_BOX 13
@@ -66,6 +106,63 @@ enum SoulLinkCommandType {
     SOULLINK_CMD_TRIGGER_WIPE = 4,
 };
 
+// Incoming Command Execution Status
+enum SoulLinkCmdExecStatus {
+    SOULLINK_CMD_STATUS_PENDING = 0,
+    SOULLINK_CMD_STATUS_SUCCESS = 1,
+    SOULLINK_CMD_STATUS_REJECTED = 2,
+    SOULLINK_CMD_STATUS_DUPLICATE = 3,
+    SOULLINK_CMD_STATUS_UNIMPLEMENTED = 4,
+    SOULLINK_CMD_STATUS_DEFERRED = 5,
+};
+
+// Transport connection state
+enum SoulLinkTransportState {
+    SOULLINK_TRANSPORT_OFFLINE = 0,
+    SOULLINK_TRANSPORT_BRIDGE_DETECTED = 1,
+    SOULLINK_TRANSPORT_CONNECTING = 2,
+    SOULLINK_TRANSPORT_CONNECTED = 3,
+    SOULLINK_TRANSPORT_DISCONNECTED = 4,
+    SOULLINK_TRANSPORT_ERROR = 5,
+};
+
+// Lobby operation codes (ROM -> Bridge)
+enum SoulLinkLobbyOp {
+    SOULLINK_LOBBY_OP_NONE = 0,
+    SOULLINK_LOBBY_OP_CREATE = 1,
+    SOULLINK_LOBBY_OP_JOIN = 2,
+    SOULLINK_LOBBY_OP_READY = 3,
+    SOULLINK_LOBBY_OP_UNREADY = 4,
+    SOULLINK_LOBBY_OP_START_RUN = 5,
+    SOULLINK_LOBBY_OP_LEAVE = 6,
+    SOULLINK_LOBBY_OP_RECONNECT = 7,
+    SOULLINK_LOBBY_OP_GET_STATUS = 8,
+};
+
+// Lobby response codes (Bridge -> ROM)
+enum SoulLinkResponseCode {
+    SOULLINK_RESP_IDLE = 0,
+    SOULLINK_RESP_OK = 1,
+    SOULLINK_RESP_PENDING = 2,
+    SOULLINK_RESP_ERR_NO_BRIDGE = 3,
+    SOULLINK_RESP_ERR_NETWORK = 4,
+    SOULLINK_RESP_ERR_ROOM_NOT_FOUND = 5,
+    SOULLINK_RESP_ERR_ROOM_FULL = 6,
+    SOULLINK_RESP_ERR_VERSION_MISMATCH = 7,
+    SOULLINK_RESP_ERR_ALREADY_STARTED = 8,
+    SOULLINK_RESP_ERR_NOT_AUTHORIZED = 9,
+    SOULLINK_RESP_ERR_DISCONNECTED = 10,
+    SOULLINK_RESP_ERR_BUSY = 11,
+    SOULLINK_RESP_ERR_INVALID_PARAM = 12,
+};
+
+// Lobby run states
+enum SoulLinkRunState {
+    SOULLINK_RUN_STATE_LOBBY = 0,
+    SOULLINK_RUN_STATE_STARTING = 1,
+    SOULLINK_RUN_STATE_IN_PROGRESS = 2,
+};
+
 // Route status in Soul Link matrix
 enum SoulLinkRouteState {
     ROUTE_STATE_OPEN = 0,             // Not yet encountered
@@ -75,37 +172,133 @@ enum SoulLinkRouteState {
     ROUTE_STATE_ENCOUNTER_ACTIVE = 4, // Currently in first encounter battle
 };
 
+// Reliable event structure (12 bytes)
+struct SoulLinkEvent {
+    u16 sequenceId;     // Monotonic sequence (1..65535, skipping 0)
+    u8 eventType;       // enum SoulLinkEventType
+    u8 mapSec;          // Region map section ID
+    u16 species;        // Caught species
+    u8 primaryType;     // Primary type
+    u8 slotIndex;       // Party slot index
+    u8 flags;           // SOULLINK_EVT_FLAG_*
+    u8 senderPlayerId;  // Local player ID (0)
+    u16 timestamp;      // Timestamp / tick counter
+};
+
+// Reliable command structure (12 bytes)
+struct SoulLinkCommand {
+    u16 sequenceId;      // Sequence number from coordinator
+    u8 cmdType;          // enum SoulLinkCommandType
+    u8 targetMapSec;     // Target route ID
+    u16 paramValue;      // Target gym stage (for UNLOCK_GYM), species, or secondary param
+    u8 paramPrimaryType; // Primary type
+    u8 sourcePlayerId;   // Player ID who triggered event
+    u8 flags;            // SOULLINK_CMD_FLAG_*
+    u8 executionStatus;  // enum SoulLinkCmdExecStatus
+    u16 timestamp;       // Timestamp
+};
+
+// In-game lobby request from ROM to Bridge (24 bytes)
+struct SoulLinkLobbyRequest {
+    u16 requestId;                          // Monotonic request ID
+    u8 opCode;                              // enum SoulLinkLobbyOp
+    u8 maxPlayers;                          // 2..8
+    u8 roomCode[SOULLINK_ROOM_CODE_LEN];    // Bounded room code (null-terminated)
+    u8 sessionToken[SOULLINK_SESSION_TOKEN_LEN]; // Opaque session token
+    u8 padding[4];
+};
+
+// Lobby response from Bridge to ROM (36 bytes)
+struct SoulLinkLobbyResponse {
+    u16 ackRequestId;                       // Matches request.requestId
+    u8 opCode;                              // Matches request.opCode
+    u8 responseCode;                        // enum SoulLinkResponseCode
+    u8 roomCode[SOULLINK_ROOM_CODE_LEN];    // Room code returned
+    u8 sessionToken[SOULLINK_SESSION_TOKEN_LEN]; // Rejoin session token
+    u8 assignedPlayerId;                    // 0..7
+    u8 activePlayerCount;                   // 1..8
+    u8 playerReadyMask;                     // bitmask of ready players
+    u8 runState;                            // enum SoulLinkRunState
+    u8 message[12];                         // Status/error text
+};
+
+// Live player info in lobby / run (16 bytes)
 struct PlayerSyncInfo {
     u8 isConnected;
     u8 isPaused;
     u8 badgeCount;
     u8 currentMapSec;
     u8 name[PLAYER_NAME_LEN];
+    u8 isReady;
+    u8 padding[3];
 };
 
+// Exact byte offsets into gSoulLink for Lua bridge auto-detection & tests
+#define SOULLINK_OFFSET_MAGIC               0x0000
+#define SOULLINK_OFFSET_PROTOCOL_VERSION    0x0004
+#define SOULLINK_OFFSET_CAPABILITIES        0x0006
+#define SOULLINK_OFFSET_SESSION_EPOCH       0x0008
+#define SOULLINK_OFFSET_TRANSPORT_STATE     0x000C
+#define SOULLINK_OFFSET_MAILBOX_FLAGS       0x000D
+#define SOULLINK_OFFSET_EVENT_DROP_COUNT    0x000E
+#define SOULLINK_OFFSET_CRITICAL_OVERFLOW   0x0010
+#define SOULLINK_OFFSET_LAST_ACKED_EVENT    0x0012
+#define SOULLINK_OFFSET_EVENT_HEAD          0x0014
+#define SOULLINK_OFFSET_EVENT_TAIL          0x0016
+#define SOULLINK_OFFSET_EVENT_QUEUE         0x0018
+#define SOULLINK_OFFSET_CMD_HEAD            0x00D8
+#define SOULLINK_OFFSET_CMD_TAIL            0x00DA
+#define SOULLINK_OFFSET_LAST_EXEC_CMD       0x00DC
+#define SOULLINK_OFFSET_CMD_DROP_COUNT      0x00DE
+#define SOULLINK_OFFSET_CMD_QUEUE           0x00E0
+#define SOULLINK_OFFSET_LOBBY_REQUEST       0x01A0
+#define SOULLINK_OFFSET_LOBBY_RESPONSE      0x01B8
+#define SOULLINK_OFFSET_PLAYER_COUNT        0x01DC
+#define SOULLINK_OFFSET_UNLOCKED_GYM        0x01DD
+#define SOULLINK_OFFSET_ROUTE_STATE         0x01DE
+#define SOULLINK_OFFSET_ROUTE_SPECIES       0x02B4
+#define SOULLINK_OFFSET_ROUTE_TYPES_MASK    0x1004
+#define SOULLINK_OFFSET_PLAYERS             0x1358
+#define SOULLINK_MAILBOX_TOTAL_SIZE         0x13D8
+
 struct SoulLinkMailbox {
-    // Magic header at offset 0 for mGBA Lua bridge auto-detection
+    // 0x0000: Magic header ("SOUL" in ASCII little-endian: 0x4C554F53)
     u32 magic;
 
-    // Outgoing from GBA -> Lua (Cleared by Lua after reading)
-    u8 outEventType;           // 0 = None, 1 = Caught, 2 = Missed, 3 = Fainted, 4 = Badge, 5 = Wipe, 6 = MapChange
-    u8 outMapSec;              // Route/Area ID (MAPSEC_*) where catch/miss/move occurred
-    u16 outSpecies;            // Species caught
-    u8 outPrimaryType;         // Primary type of caught mon
-    u8 outSlotIndex;           // Party/Box link ID
+    // 0x0004: Version, capabilities, and session identity
+    u16 protocolVersion;                        // 0x0004 (2 bytes) = 1
+    u16 capabilities;                           // 0x0006 (2 bytes)
+    u32 sessionEpoch;                           // 0x0008 (4 bytes) = unique session ID per ROM boot/reset
+    u8 transportState;                          // 0x000C (1 byte)
+    u8 mailboxFlags;                            // 0x000D (1 byte)
+    u16 eventDropCount;                         // 0x000E (2 bytes) - non-critical dropped count
+    u16 criticalOverflowCount;                  // 0x0010 (2 bytes) - critical event overflow count
+    u16 lastAckedEventSequenceId;               // 0x0012 (2 bytes) - acknowledged sequence (Bridge writes)
 
-    // Incoming from Lua -> GBA (Processed by GBA outside of battle)
-    u8 inCommandType;          // 0 = None, 1 = Kill Linked Mon, 2 = Lock Route, 3 = Unlock Gym, 4 = Trigger Wipe
-    u8 inTargetMapSec;         // Route ID to kill/lock
-    u8 inNotificationPlayerId; // Which friend triggered the event (for UI popup)
+    // 0x0014: Outgoing Event Ring Buffer Management (ROM -> Bridge)
+    u16 eventHead;                              // 0x0014 (2 bytes) - write index (ROM owns)
+    u16 eventTail;                              // 0x0016 (2 bytes) - read index (Bridge owns)
+    struct SoulLinkEvent eventQueue[SOULLINK_EVENT_QUEUE_SIZE]; // 0x0018 (16 * 12 = 192 bytes = 0xC0)
 
-    // Persistent Synced State
-    u8 playerCount;                             // 1 to 8
-    u8 unlockedGymStage;                        // Highest gym currently allowed (0 to 8)
-    u8 routeState[NUM_MAPSECS];                 // 0 = Open, 1 = Alive, 2 = Boxed, 3 = Dead/Forfeited, 4 = Active
-    u16 routeSpecies[NUM_MAPSECS][MAX_PLAYERS]; // Species caught per route per player for Tracker UI
-    u32 routeTypesMask[NUM_MAPSECS];            // 32-bit bitmask of primary types used within each route link
-    struct PlayerSyncInfo players[MAX_PLAYERS]; // Live status, badges, and current route of all 8 players
+    // 0x00D8: Incoming Command Ring Buffer Management (Bridge -> ROM)
+    u16 cmdHead;                                // 0x00D8 (2 bytes) - write index (Bridge owns)
+    u16 cmdTail;                                // 0x00DA (2 bytes) - read index (ROM owns)
+    u16 lastExecutedCmdSequenceId;              // 0x00DC (2 bytes) - sequence executed by ROM
+    u16 cmdDropCount;                           // 0x00DE (2 bytes) - dropped incoming command count
+    struct SoulLinkCommand cmdQueue[SOULLINK_CMD_QUEUE_SIZE]; // 0x00E0 (16 * 12 = 192 bytes = 0xC0)
+
+    // 0x01A0: In-Game Lobby Handshake
+    struct SoulLinkLobbyRequest lobbyRequest;   // 0x01A0 (24 bytes = 0x18)
+    struct SoulLinkLobbyResponse lobbyResponse; // 0x01B8 (36 bytes = 0x24)
+
+    // 0x01DC: Persistent Synced State
+    u8 playerCount;                             // 0x01DC (1 byte)
+    u8 unlockedGymStage;                        // 0x01DD (1 byte)
+    u8 routeState[NUM_MAPSECS];                 // 0x01DE (213 bytes)
+    u8 paddingRoute;                            // 0x02B3 (1 byte, align to 2 bytes)
+    u16 routeSpecies[NUM_MAPSECS][MAX_PLAYERS]; // 0x02B4 (213 * 8 * 2 = 3408 bytes = 0x0D50)
+    u32 routeTypesMask[NUM_MAPSECS];            // 0x1004 (213 * 4 = 852 bytes = 0x0354)
+    struct PlayerSyncInfo players[MAX_PLAYERS]; // 0x1358 (8 * 16 = 128 bytes = 0x80)
 };
 
 struct Pokemon;
@@ -122,7 +315,33 @@ u16 SoulLink_GetEncounterId(void);
 u16 SoulLink_GetEncounterIdForMon(struct Pokemon *mon);
 bool8 SoulLink_CanCatchOnCurrentMap(void);
 u8 SoulLink_GetCurrentLevelCap(void);
+bool8 SoulLink_IsSafeOverworldState(void);
 void SoulLink_ProcessOverworldCommands(void);
+
+// Queue and Event Management (Phase 3 Step 1)
+bool8 SoulLink_PushEvent(u8 eventType, u8 mapSec, u16 species, u8 primaryType, u8 slotIndex, u8 flags);
+bool8 SoulLink_PopEvent(struct SoulLinkEvent *outEvent);
+void SoulLink_AcknowledgeEvents(u16 sequenceId);
+u16 SoulLink_GetPendingEventCount(void);
+u16 SoulLink_GetEventDropCount(void);
+u16 SoulLink_GetCriticalOverflowCount(void);
+
+bool8 SoulLink_ReceiveCommand(const struct SoulLinkCommand *cmd);
+u16 SoulLink_GetPendingCommandCount(void);
+
+// Lobby Request Operations (Phase 3 Step 1)
+bool8 SoulLink_IsLobbyRequestPending(void);
+bool8 SoulLink_LobbyRequestCreate(u8 maxPlayers);
+bool8 SoulLink_LobbyRequestJoin(const u8 *roomCode);
+bool8 SoulLink_LobbyRequestReady(bool8 ready);
+bool8 SoulLink_LobbyRequestStartRun(void);
+bool8 SoulLink_LobbyRequestLeave(void);
+bool8 SoulLink_LobbyRequestReconnect(const u8 *roomCode, const u8 *sessionToken);
+bool8 SoulLink_LobbyRequestGetStatus(void);
+
+// Transport State Management
+void SoulLink_SetTransportState(u8 state);
+u8 SoulLink_GetTransportState(void);
 
 // Phase 2: Local Nuzlocke Mechanics
 void SoulLink_OnWildBattleStart(void);
@@ -143,5 +362,11 @@ bool8 SoulLink_IsGymStageUnlocked(u8 stage);
 u8 SoulLink_GetRequiredGymStageForMap(void);
 u8 SoulLink_GetBadgeCount(void);
 void SoulLink_OnBadgeEarned(void);
+
+#if TESTING
+void SoulLink_TestSetNextEventSequenceId(u16 seq);
+void SoulLink_TestSetSessionEpoch(u32 epoch);
+void SoulLink_TestSetSafeOverworldOverride(bool8 enable, bool8 isSafe);
+#endif
 
 #endif // GUARD_SOULLINK_H
