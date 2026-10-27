@@ -847,12 +847,14 @@ u8 SoulLink_GetBadgeCount(void)
 
 /**
  * Checks whether an active multiplayer Soul Link session is currently running.
- * In multiplayer mode, group gym progression is coordinator-authoritative.
+ * Distinguishes a connected transport from an active multiplayer run:
+ * - Connecting the adapter while playing solo does NOT block normal Gym progression.
+ * - An active run requires lobbyResponse.runState == SOULLINK_RUN_STATE_IN_PROGRESS.
+ * - Loss of transport connection during an active run preserves multiplayer restrictions.
  */
 bool8 SoulLink_IsMultiplayerActive(void)
 {
-    return (gSoulLink.lobbyResponse.runState == SOULLINK_RUN_STATE_IN_PROGRESS
-         || gSoulLink.transportState == SOULLINK_TRANSPORT_CONNECTED);
+    return (gSoulLink.lobbyResponse.runState == SOULLINK_RUN_STATE_IN_PROGRESS);
 }
 
 /**
@@ -1006,16 +1008,26 @@ static bool8 IsCommandSequenceDuplicateOrStale(u16 cmdSeq, u16 lastExecuted)
  * Real ROM enforcement for SOULLINK_CMD_KILL_MON.
  * Identifies the linked Pokémon by stored encounter/link identity across party and PC storage,
  * permanently sets its HP to 0, moves it to the Graveyard box (Box 14), zeroes the source slot,
- * and compacts party slots. Idempotent: safe to execute multiple times without unintended mutations.
+ * and compacts party slots.
+ *
+ * Safety & Durability:
+ * - Returns SOULLINK_CMD_STATUS_REJECTED if targetMapSec is out of bounds.
+ * - Returns SOULLINK_CMD_STATUS_DEFERRED if PC storage is unavailable or Graveyard box is full,
+ *   preserving Pokémon data and fainted restrictions without falsely acknowledging enforcement.
+ * - Returns SOULLINK_CMD_STATUS_SUCCESS only when required state changes safely complete.
  */
-bool8 SoulLink_ApplyKillMon(u8 targetMapSec, u16 species)
+u8 SoulLink_ApplyKillMon(u8 targetMapSec, u16 species)
 {
 #if __has_include("global.h")
     s32 i;
     bool8 anyPartyMoved = FALSE;
+    bool8 transferDeferred = FALSE;
 
     if (targetMapSec >= NUM_MAPSECS)
-        return FALSE;
+        return SOULLINK_CMD_STATUS_REJECTED;
+
+    if (gPokemonStoragePtr == NULL)
+        return SOULLINK_CMD_STATUS_DEFERRED;
 
     // 1. Search player party for Pokémon encountered on targetMapSec
     for (i = (s32)PARTY_SIZE - 1; i >= 0; i--)
@@ -1029,17 +1041,20 @@ bool8 SoulLink_ApplyKillMon(u8 targetMapSec, u16 species)
         if (encounterId == targetMapSec)
         {
             u16 zeroHp = 0;
-            SetMonData(mon, MON_DATA_HP, &zeroHp);
-
-            if (gPokemonStoragePtr != NULL)
+            s16 freeSpot = GetFirstFreeBoxSpot(SOULLINK_GRAVEYARD_BOX);
+            if (freeSpot != -1)
             {
-                s16 freeSpot = GetFirstFreeBoxSpot(SOULLINK_GRAVEYARD_BOX);
-                if (freeSpot != -1)
-                {
-                    SetBoxMonAt(SOULLINK_GRAVEYARD_BOX, freeSpot, &mon->box);
-                    ZeroMonData(mon);
-                    anyPartyMoved = TRUE;
-                }
+                SetMonData(mon, MON_DATA_HP, &zeroHp);
+                SetBoxMonAt(SOULLINK_GRAVEYARD_BOX, freeSpot, &mon->box);
+                ZeroMonData(mon);
+                anyPartyMoved = TRUE;
+            }
+            else
+            {
+                // Graveyard box is full: retain in party at 0 HP so data is not lost,
+                // and defer command so it is not prematurely acknowledged.
+                SetMonData(mon, MON_DATA_HP, &zeroHp);
+                transferDeferred = TRUE;
             }
         }
     }
@@ -1050,7 +1065,6 @@ bool8 SoulLink_ApplyKillMon(u8 targetMapSec, u16 species)
     }
 
     // 2. Search PC storage boxes (excluding Graveyard box)
-    if (gPokemonStoragePtr != NULL)
     {
         s32 boxId, boxPos;
         for (boxId = 0; boxId < TOTAL_BOXES_COUNT; boxId++)
@@ -1074,9 +1088,19 @@ bool8 SoulLink_ApplyKillMon(u8 targetMapSec, u16 species)
                         SetBoxMonAt(SOULLINK_GRAVEYARD_BOX, freeSpot, boxMon);
                         ZeroBoxMonAt(boxId, boxPos);
                     }
+                    else
+                    {
+                        // Graveyard box full: cannot transfer from PC
+                        transferDeferred = TRUE;
+                    }
                 }
             }
         }
+    }
+
+    if (transferDeferred)
+    {
+        return SOULLINK_CMD_STATUS_DEFERRED;
     }
 
     // 3. Mark route state as dead and persist to SaveBlock3
@@ -1101,14 +1125,14 @@ bool8 SoulLink_ApplyKillMon(u8 targetMapSec, u16 species)
         }
     }
 
-    return TRUE;
+    return SOULLINK_CMD_STATUS_SUCCESS;
 #else
     if (targetMapSec < NUM_MAPSECS)
     {
         gSoulLink.routeState[targetMapSec] = ROUTE_STATE_DEAD_FORFEITED;
-        return TRUE;
+        return SOULLINK_CMD_STATUS_SUCCESS;
     }
-    return FALSE;
+    return SOULLINK_CMD_STATUS_REJECTED;
 #endif
 }
 
@@ -1141,15 +1165,7 @@ void SoulLink_ProcessOverworldCommands(void)
         switch (cmd->cmdType)
         {
         case SOULLINK_CMD_KILL_MON:
-            if (cmd->targetMapSec >= NUM_MAPSECS)
-            {
-                cmd->executionStatus = SOULLINK_CMD_STATUS_REJECTED;
-            }
-            else
-            {
-                SoulLink_ApplyKillMon((u8)cmd->targetMapSec, cmd->paramValue);
-                cmd->executionStatus = SOULLINK_CMD_STATUS_SUCCESS;
-            }
+            cmd->executionStatus = SoulLink_ApplyKillMon((u8)cmd->targetMapSec, cmd->paramValue);
             break;
 
         case SOULLINK_CMD_LOCK_ROUTE:
