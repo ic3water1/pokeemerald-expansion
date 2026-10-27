@@ -19,6 +19,7 @@
 #include "agb_flash.h"
 #include "event_data.h"
 #include "constants/event_objects.h"
+#include "soullink.h"
 
 static void ApplyNewEncryptionKeyToAllEncryptedData(u32 encryptionKey);
 
@@ -245,12 +246,14 @@ void CopyPartyAndObjectsToSave(void)
 {
     SavePlayerParty();
     SaveObjectEvents();
+    SoulLink_SaveToSaveBlock3();
 }
 
 void CopyPartyAndObjectsFromSave(void)
 {
     LoadPlayerParty();
     LoadObjectEvents();
+    SoulLink_LoadFromSaveBlock3();
 }
 
 void LoadPlayerBag(void)

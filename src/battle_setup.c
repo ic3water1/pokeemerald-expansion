@@ -739,6 +739,18 @@ static void CB2_EndScriptedWildBattle(void)
     CpuFill16(0, (void *)(BG_PLTT), BG_PLTT_SIZE);
     ResetOamRange(0, 128);
 
+    if (gBattleOutcome == B_OUTCOME_CAUGHT)
+    {
+        u16 caughtSpecies = GetMonData(&gParties[B_TRAINER_OPPONENT_A][0], MON_DATA_SPECIES);
+        SoulLink_OnWildCatchSuccess(caughtSpecies);
+    }
+    else if (!IsPlayerDefeated(gBattleOutcome))
+    {
+        SoulLink_OnWildEncounterFailed();
+    }
+
+    SoulLink_ProcessFaintedMonsPostBattle();
+
     if (IsPlayerDefeated(gBattleOutcome) == TRUE)
     {
         if (CurrentBattlePyramidLocation() != PYRAMID_LOCATION_NONE)
@@ -1632,6 +1644,7 @@ static void CB2_EndTrainerBattle(void)
     }
     else if (IsPlayerDefeated(gBattleOutcome))
     {
+        SoulLink_ProcessFaintedMonsPostBattle();
         if (CurrentBattlePyramidLocation() != PYRAMID_LOCATION_NONE || InTrainerHillChallenge() || FlagGet(B_FLAG_NO_WHITEOUT))
             SetMainCallback2(CB2_ReturnToFieldContinueScriptPlayMapMusic);
         else
@@ -1652,6 +1665,7 @@ static void CB2_EndTrainerBattle(void)
 
 static void CB2_EndRematchBattle(void)
 {
+    SoulLink_ProcessFaintedMonsPostBattle();
     if (TRAINER_BATTLE_PARAM.opponentA == TRAINER_SECRET_BASE)
     {
         DowngradeBadPoison();

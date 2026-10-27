@@ -108,12 +108,18 @@ struct SoulLinkMailbox {
     struct PlayerSyncInfo players[MAX_PLAYERS]; // Live status, badges, and current route of all 8 players
 };
 
+struct Pokemon;
+
 extern EWRAM_DATA struct SoulLinkMailbox gSoulLink;
 
 /* Function Declarations */
 void SoulLink_Init(void);
+void SoulLink_NewGame(void);
+void SoulLink_SaveToSaveBlock3(void);
+void SoulLink_LoadFromSaveBlock3(void);
 void SoulLink_EmitEvent(u8 eventType, u8 mapSec, u16 species, u8 primaryType, u8 slotIndex);
 u16 SoulLink_GetEncounterId(void);
+u16 SoulLink_GetEncounterIdForMon(struct Pokemon *mon);
 bool8 SoulLink_CanCatchOnCurrentMap(void);
 u8 SoulLink_GetCurrentLevelCap(void);
 void SoulLink_ProcessOverworldCommands(void);
@@ -122,7 +128,6 @@ void SoulLink_ProcessOverworldCommands(void);
 void SoulLink_OnWildBattleStart(void);
 void SoulLink_OnWildCatchSuccess(u16 species);
 void SoulLink_OnWildEncounterFailed(void);
-void SoulLink_QueueFaintedMon(u8 partyIndex);
 void SoulLink_ProcessFaintedMonsPostBattle(void);
 bool8 SoulLink_IsPartyWiped(void);
 u8 SoulLink_GetLivingPokemonCount(void);
@@ -130,6 +135,7 @@ u8 SoulLink_GetLivingPokemonCount(void);
 // Gym progression
 bool8 CheckPartyGymUnlock(void);
 u8 SoulLink_GetRequiredGymStageForMap(void);
-void SoulLink_OnBadgeEarned(u8 badgeNum);
+u8 SoulLink_GetBadgeCount(void);
+void SoulLink_OnBadgeEarned(void);
 
 #endif // GUARD_SOULLINK_H

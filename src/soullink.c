@@ -19,10 +19,6 @@ extern struct MapHeader gMapHeader;
 // The dedicated EWRAM communication mailbox allocated in .sbss
 EWRAM_DATA __attribute__((used)) struct SoulLinkMailbox gSoulLink = {0};
 
-// Temporary queue for party indices that fainted during the current battle
-static u8 sFaintedPartyIndices[PARTY_SIZE];
-static u8 sFaintedCount = 0;
-
 // Hard level caps indexed by unlockedGymStage (0 through 8)
 static const u8 sGymLevelCaps[] = {
     15, // Stage 0: Before Badge 1 (Roxanne - Ace Lv. 15)
@@ -37,8 +33,9 @@ static const u8 sGymLevelCaps[] = {
 };
 
 /**
- * Initializes the Soul Link mailbox structure in EWRAM.
+ * Initializes the Soul Link mailbox structure in EWRAM on GBA boot.
  * Sets the 0x4C554F53 ("SOUL") magic header so the mGBA Lua bridge can locate it.
+ * Note: Does NOT clear route state or gym progression so saved games are preserved.
  */
 void SoulLink_Init(void)
 {
@@ -60,20 +57,8 @@ void SoulLink_Init(void)
     gSoulLink.inTargetMapSec = 0;
     gSoulLink.inNotificationPlayerId = 0;
 
-    // Initial game state
+    // Initial player count
     gSoulLink.playerCount = 1;
-    gSoulLink.unlockedGymStage = 0;
-
-    // Initialize all Hoenn route states to OPEN
-    for (i = 0; i < NUM_MAPSECS; i++)
-    {
-        gSoulLink.routeState[i] = ROUTE_STATE_OPEN;
-        gSoulLink.routeTypesMask[i] = 0;
-        for (p = 0; p < MAX_PLAYERS; p++)
-        {
-            gSoulLink.routeSpecies[i][p] = 0;
-        }
-    }
 
     // Initialize local player (Slot 0)
     for (p = 0; p < MAX_PLAYERS; p++)
@@ -87,8 +72,77 @@ void SoulLink_Init(void)
             gSoulLink.players[p].name[i] = 0;
         }
     }
+}
 
-    sFaintedCount = 0;
+/**
+ * Initializes fresh Nuzlocke state when starting a New Game.
+ */
+void SoulLink_NewGame(void)
+{
+    u32 i, p;
+
+    gSoulLink.unlockedGymStage = 0;
+
+    for (i = 0; i < NUM_MAPSECS; i++)
+    {
+        gSoulLink.routeState[i] = ROUTE_STATE_OPEN;
+        gSoulLink.routeTypesMask[i] = 0;
+        for (p = 0; p < MAX_PLAYERS; p++)
+        {
+            gSoulLink.routeSpecies[i][p] = 0;
+        }
+    }
+
+    SoulLink_SaveToSaveBlock3();
+}
+
+/**
+ * Saves persistent SoulLink data into SaveBlock3 (which is flushed to flash save sectors).
+ */
+void SoulLink_SaveToSaveBlock3(void)
+{
+#if __has_include("global.h")
+    if (gSaveBlock3Ptr != NULL)
+    {
+        u32 i;
+        gSaveBlock3Ptr->soulLink.unlockedGymStage = gSoulLink.unlockedGymStage;
+        for (i = 0; i < NUM_MAPSECS; i++)
+        {
+            gSaveBlock3Ptr->soulLink.routeState[i] = gSoulLink.routeState[i];
+            gSaveBlock3Ptr->soulLink.routeSpecies[i] = gSoulLink.routeSpecies[i][0];
+            gSaveBlock3Ptr->soulLink.routeTypesMask[i] = gSoulLink.routeTypesMask[i];
+        }
+    }
+#endif
+}
+
+/**
+ * Loads persistent SoulLink data from SaveBlock3 into EWRAM mailbox.
+ */
+void SoulLink_LoadFromSaveBlock3(void)
+{
+#if __has_include("global.h")
+    if (gSaveBlock3Ptr != NULL)
+    {
+        u32 i;
+        u8 badges;
+
+        gSoulLink.unlockedGymStage = gSaveBlock3Ptr->soulLink.unlockedGymStage;
+        for (i = 0; i < NUM_MAPSECS; i++)
+        {
+            gSoulLink.routeState[i] = gSaveBlock3Ptr->soulLink.routeState[i];
+            gSoulLink.routeSpecies[i][0] = gSaveBlock3Ptr->soulLink.routeSpecies[i];
+            gSoulLink.routeTypesMask[i] = gSaveBlock3Ptr->soulLink.routeTypesMask[i];
+        }
+
+        // Synchronize unlocked gym stage with in-game badge count if badges exceed saved stage
+        badges = SoulLink_GetBadgeCount();
+        if (badges > gSoulLink.unlockedGymStage)
+        {
+            gSoulLink.unlockedGymStage = badges;
+        }
+    }
+#endif
 }
 
 /**
@@ -123,6 +177,31 @@ u16 SoulLink_GetEncounterId(void)
 #endif
 
     return (u16)mapSec;
+}
+
+/**
+ * Returns the recorded encounter ID for a caught Pokémon, disambiguating split routes.
+ */
+u16 SoulLink_GetEncounterIdForMon(struct Pokemon *mon)
+{
+#if __has_include("global.h")
+    u8 metLoc = (u8)GetMonData(mon, MON_DATA_MET_LOCATION);
+    u16 species = GetMonData(mon, MON_DATA_SPECIES);
+
+    if (metLoc == MAPSEC_ROUTE_104)
+    {
+        // If Route 104 North was registered with this species, attribute death to Route 104 North
+        if (gSoulLink.routeSpecies[ENCOUNTER_ID_ROUTE_104_NORTH][0] == species)
+        {
+            return ENCOUNTER_ID_ROUTE_104_NORTH;
+        }
+        return ENCOUNTER_ID_ROUTE_104_SOUTH;
+    }
+
+    return (u16)metLoc;
+#else
+    return 0;
+#endif
 }
 
 /**
@@ -173,12 +252,16 @@ void SoulLink_OnWildCatchSuccess(u16 species)
 
     if (encounterId < NUM_MAPSECS)
     {
-        gSoulLink.routeState[encounterId] = ROUTE_STATE_ALIVE;
-        gSoulLink.routeSpecies[encounterId][0] = species;
-        gSoulLink.routeTypesMask[encounterId] |= SOULLINK_TYPE_BIT(primaryType);
+        // Enforce catch validation guard: only allow catch if route was OPEN or ACTIVE
+        if (gSoulLink.routeState[encounterId] == ROUTE_STATE_OPEN
+         || gSoulLink.routeState[encounterId] == ROUTE_STATE_ENCOUNTER_ACTIVE)
+        {
+            gSoulLink.routeState[encounterId] = ROUTE_STATE_ALIVE;
+            gSoulLink.routeSpecies[encounterId][0] = species;
+            gSoulLink.routeTypesMask[encounterId] |= SOULLINK_TYPE_BIT(primaryType);
+            SoulLink_EmitEvent(SOULLINK_EVENT_CAUGHT, (u8)encounterId, species, primaryType, 0);
+        }
     }
-
-    SoulLink_EmitEvent(SOULLINK_EVENT_CAUGHT, (u8)encounterId, species, primaryType, 0);
 }
 
 /**
@@ -196,30 +279,9 @@ void SoulLink_OnWildEncounterFailed(void)
 }
 
 /**
- * Queues a party index that fainted during battle.
- */
-void SoulLink_QueueFaintedMon(u8 partyIndex)
-{
-    u32 i;
-    if (partyIndex >= PARTY_SIZE)
-        return;
-
-    // Avoid duplicate queueing
-    for (i = 0; i < sFaintedCount; i++)
-    {
-        if (sFaintedPartyIndices[i] == partyIndex)
-            return;
-    }
-
-    if (sFaintedCount < PARTY_SIZE)
-    {
-        sFaintedPartyIndices[sFaintedCount++] = partyIndex;
-    }
-}
-
-/**
  * Processes fainted party members upon return to overworld.
- * Moves fainted Pokémon to the Graveyard box (Box 14), marks routes dead, and emits events.
+ * Moves fainted Pokémon safely to the Graveyard box (Box 14), marks routes dead, and emits events.
+ * Crucially: Never zeroes or deletes a Pokémon unless it has been safely stored in the Graveyard box.
  */
 void SoulLink_ProcessFaintedMonsPostBattle(void)
 {
@@ -232,44 +294,53 @@ void SoulLink_ProcessFaintedMonsPostBattle(void)
         struct Pokemon *mon = &gParties[B_TRAINER_PLAYER][i];
         u16 species = GetMonData(mon, MON_DATA_SPECIES);
         u16 hp = GetMonData(mon, MON_DATA_HP);
-        u8 metLoc;
+        u16 encounterId;
         u8 primaryType;
+        bool8 storedInGraveyard = FALSE;
 
         if (species == SPECIES_NONE || hp > 0)
             continue;
 
-        metLoc = (u8)GetMonData(mon, MON_DATA_MET_LOCATION);
+        encounterId = SoulLink_GetEncounterIdForMon(mon);
         primaryType = gSpeciesInfo[species].types[0];
 
         // Mark route link as dead
-        if (metLoc < NUM_MAPSECS)
+        if (encounterId < NUM_MAPSECS)
         {
-            gSoulLink.routeState[metLoc] = ROUTE_STATE_DEAD_FORFEITED;
+            gSoulLink.routeState[encounterId] = ROUTE_STATE_DEAD_FORFEITED;
         }
 
         // Emit death event
-        SoulLink_EmitEvent(SOULLINK_EVENT_FAINTED, metLoc, species, primaryType, (u8)i);
+        SoulLink_EmitEvent(SOULLINK_EVENT_FAINTED, (u8)encounterId, species, primaryType, (u8)i);
 
-        // Move to Graveyard PC Box (Box 13)
+        // Attempt transfer to Graveyard PC Box (Box 13)
         if (gPokemonStoragePtr != NULL)
         {
             s16 freeSpot = GetFirstFreeBoxSpot(SOULLINK_GRAVEYARD_BOX);
             if (freeSpot != -1)
             {
                 SetBoxMonAt(SOULLINK_GRAVEYARD_BOX, freeSpot, &mon->box);
+                storedInGraveyard = TRUE;
             }
         }
 
-        ZeroMonData(mon);
-        anyMoved = TRUE;
+        // Only delete from party if safely placed in the Graveyard box!
+        if (storedInGraveyard)
+        {
+            ZeroMonData(mon);
+            anyMoved = TRUE;
+        }
+        else
+        {
+            // Graveyard full or PC unavailable: keep mon in party (at 0 HP)
+            // so Pokémon data is NEVER permanently lost.
+        }
     }
 
     if (anyMoved)
     {
         CompactPartySlots();
     }
-
-    sFaintedCount = 0;
 #endif
 }
 
@@ -387,15 +458,34 @@ bool8 CheckPartyGymUnlock(void)
 }
 
 /**
- * Called when a Gym Badge is earned by the player.
+ * Counts total badges currently earned by the player.
  */
-void SoulLink_OnBadgeEarned(u8 badgeNum)
+u8 SoulLink_GetBadgeCount(void)
 {
-    if (gSoulLink.unlockedGymStage < 8)
+    u8 count = 0;
+#if __has_include("global.h")
+    u32 i;
+    for (i = FLAG_BADGE01_GET; i < FLAG_BADGE01_GET + NUM_BADGES; i++)
     {
-        gSoulLink.unlockedGymStage++;
+        if (FlagGet(i))
+            count++;
     }
-    SoulLink_EmitEvent(SOULLINK_EVENT_BADGE, gMapHeader.regionMapSectionId, 0, 0, badgeNum);
+#endif
+    return count;
+}
+
+/**
+ * Called when a Gym Badge is earned by the player (script special: SoulLink_OnBadgeEarned).
+ */
+void SoulLink_OnBadgeEarned(void)
+{
+    u8 badges = SoulLink_GetBadgeCount();
+    if (badges > gSoulLink.unlockedGymStage)
+    {
+        gSoulLink.unlockedGymStage = badges;
+    }
+    SoulLink_SaveToSaveBlock3();
+    SoulLink_EmitEvent(SOULLINK_EVENT_BADGE, gMapHeader.regionMapSectionId, 0, 0, badges);
 }
 
 /**

@@ -2887,6 +2887,13 @@ static void Task_DepositMenu(u8 taskId)
             SetPokeStorageTask(Task_PokeStorageMain);
             break;
         default:
+            if (boxId == SOULLINK_GRAVEYARD_BOX)
+            {
+                PlaySE(SE_BOO);
+                PrintMessage(MSG_BOX_IS_FULL);
+                sStorage->state = 4;
+                break;
+            }
             if (TryStorePartyMonInBox(boxId))
             {
                 sDepositBoxId = boxId;
@@ -6175,6 +6182,8 @@ static void DoCursorNewPosUpdate(void)
         SetMovingMonPriority(1);
         break;
     case CURSOR_AREA_IN_BOX:
+        if (StorageGetCurrentBox() == SOULLINK_GRAVEYARD_BOX)
+            return;
         if (sStorage->inBoxMovingMode == MOVE_MODE_NORMAL)
         {
             sStorage->cursorSprite->oam.priority = 1;
@@ -6408,6 +6417,8 @@ static void MoveMon(void)
         SetMovingMonSprite(MODE_PARTY, sCursorPosition);
         break;
     case CURSOR_AREA_IN_BOX:
+        if (StorageGetCurrentBox() == SOULLINK_GRAVEYARD_BOX)
+            return;
         if (sStorage->inBoxMovingMode == MOVE_MODE_NORMAL)
         {
             SetMovingMonData(StorageGetCurrentBox(), sCursorPosition);
@@ -6912,7 +6923,11 @@ static bool8 CanPlaceMon(void)
         if (sCursorArea == CURSOR_AREA_IN_PARTY && GetMonData(&gParties[B_TRAINER_PLAYER][sCursorPosition], MON_DATA_SPECIES) == SPECIES_NONE)
             return TRUE;
         else if (sCursorArea == CURSOR_AREA_IN_BOX && GetBoxMonDataAt(StorageGetCurrentBox(), sCursorPosition, MON_DATA_SPECIES_OR_EGG) == SPECIES_NONE)
+        {
+            if (StorageGetCurrentBox() == SOULLINK_GRAVEYARD_BOX)
+                return FALSE;
             return TRUE;
+        }
         else
             return FALSE;
     }
@@ -6923,6 +6938,8 @@ static bool8 CanShiftMon(void)
 {
     if (sIsMonBeingMoved)
     {
+        if (sCursorArea == CURSOR_AREA_IN_BOX && StorageGetCurrentBox() == SOULLINK_GRAVEYARD_BOX)
+            return FALSE;
         if (sCursorArea == CURSOR_AREA_IN_PARTY && CountPartyAliveNonEggMonsExcept(sCursorPosition) == 0)
         {
             if (sStorage->displayMonIsEgg || GetMonData(&sStorage->movingMon, MON_DATA_HP) == 0)

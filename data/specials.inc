@@ -639,3 +639,4 @@ gSpecials::
 	def_special StickerManGetBragFlags
 	def_special CheckAddCoins
 	def_special CheckPartyGymUnlock
+	def_special SoulLink_OnBadgeEarned
