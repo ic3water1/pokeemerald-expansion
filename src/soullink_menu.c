@@ -86,18 +86,18 @@ static const struct WindowTemplate sSoulLinkWinTemplates[] =
         .tilemapLeft = 2,
         .tilemapTop = 4,
         .width = 26,
-        .height = 11,
+        .height = 12,
         .paletteNum = 1,
         .baseBlock = 52,
     },
     [WIN_FOOTER] = {
         .bg = 0,
         .tilemapLeft = 2,
-        .tilemapTop = 16,
+        .tilemapTop = 17,
         .width = 26,
-        .height = 3,
+        .height = 2,
         .paletteNum = 1,
-        .baseBlock = 338,
+        .baseBlock = 364,
     },
     DUMMY_WIN_TEMPLATE,
 };
@@ -165,7 +165,7 @@ static const u8 *const sFaceCodeNames[16] = {
 
 // 4x4 Grid Coordinates (Centers in screen pixels)
 static const u8 sGridX[4] = {72, 104, 136, 168};
-static const u8 sGridY[4] = {58, 78, 98, 118};
+static const u8 sGridY[4] = {56, 74, 92, 110};
 
 // State variables in EWRAM
 static EWRAM_DATA u8 sScreen = 0;
@@ -186,6 +186,7 @@ static EWRAM_DATA u8 sGridSpriteIds[16] = {0};
 static EWRAM_DATA u8 sSlotSpriteIds[4] = {0};
 static EWRAM_DATA u8 sLobbyFaceSpriteIds[4] = {0};
 static EWRAM_DATA bool8 sSpritesInitialized = FALSE;
+ALIGNED(4) EWRAM_DATA static u8 sFaceIconTiles[16][1024] = {{0}};
 
 // Forward declarations
 static void Task_SoulLinkMenu_Main(u8 taskId);
@@ -198,6 +199,8 @@ static void UpdateGridCursorAnimation(void);
 static void DestroyLobbyFaceSprites(void);
 static void CreateLobbyFaceSprites(void);
 static void DestroyAllMenuSprites(void);
+static void InitSoulLinkFaceIcons(void);
+static u8 CreateFaceIconSprite(u8 faceIndex, s16 x, s16 y, u8 subpriority);
 
 // Exported Face Code Helpers
 u16 SoulLink_GetFaceCodeSpecies(u8 index)
@@ -389,6 +392,72 @@ static void UpdateGridCursorAnimation(void)
     }
 }
 
+static void InitSoulLinkFaceIcons(void)
+{
+    static const u8 sFaceCutoffs[16] = {
+        [0] = 22,  // Pikachu: head rows 10..22 (height 13), trim body 23..31
+        [1] = 22,  // Bulbasaur: head rows 11..22 (height 12), trim body 23..31
+        [2] = 21,  // Charmander: head rows 11..21 (height 11), trim body 22..31
+        [3] = 21,  // Squirtle: head rows 13..21 (height 9), trim body 22..31
+        [4] = 21,  // Eevee: head rows 12..21 (height 10), trim body 22..31
+        [5] = 26,  // Jigglypuff: sphere face rows 10..26, trim feet 27..31
+        [6] = 20,  // Meowth: head rows 9..20 (height 12), trim body 21..31
+        [7] = 24,  // Gengar: ghost face rows 7..24 (height 18), trim feet 25..31
+        [8] = 20,  // Treecko: head rows 9..20 (height 12), trim body 21..31
+        [9] = 20,  // Torchic: head rows 10..20 (height 11), trim body 21..31
+        [10] = 22, // Mudkip: head rows 11..22 (height 12), trim body 23..31
+        [11] = 20, // Ralts: head rows 11..20 (height 10), trim body 21..31
+        [12] = 26, // Lotad: lily pad & beak rows 13..26 (height 14), trim 27..31
+        [13] = 27, // Spheal: sphere face rows 13..27 (height 15), trim 28..31
+        [14] = 21, // Sableye: head rows 9..21 (height 13), trim body 22..31
+        [15] = 20, // Absol: head & horn rows 7..20 (height 14), trim body 21..31
+    };
+
+    u8 i, f, y, tx, b;
+    for (i = 0; i < 16; i++)
+    {
+        const u8 *srcTiles = GetMonIconTiles(sFaceCodeSpecies[i], 0);
+        if (srcTiles == NULL)
+            continue;
+
+        memcpy(sFaceIconTiles[i], srcTiles, 1024);
+
+        u8 cutoff = sFaceCutoffs[i];
+        for (f = 0; f < 2; f++)
+        {
+            for (y = cutoff + 1; y < 32; y++)
+            {
+                u8 ty = y / 8;
+                u8 r = y % 8;
+                for (tx = 0; tx < 4; tx++)
+                {
+                    u16 offset = (f * 16 + ty * 4 + tx) * 32 + r * 4;
+                    for (b = 0; b < 4; b++)
+                    {
+                        sFaceIconTiles[i][offset + b] = 0;
+                    }
+                }
+            }
+        }
+    }
+}
+
+static u8 CreateFaceIconSprite(u8 faceIndex, s16 x, s16 y, u8 subpriority)
+{
+    if (faceIndex >= 16)
+        return MAX_SPRITES;
+
+    u8 spriteId = CreateMonIconNoPersonality(sFaceCodeSpecies[faceIndex], SpriteCallbackDummy, x, y, subpriority);
+    if (spriteId < MAX_SPRITES)
+    {
+        gSprites[spriteId].animPaused = TRUE;
+        gSprites[spriteId].animBeginning = FALSE;
+        gSprites[spriteId].images = (const struct SpriteFrameImage *)sFaceIconTiles[faceIndex];
+        UpdateMonIconFrame(&gSprites[spriteId]);
+    }
+    return spriteId;
+}
+
 static void CreateJoinGridSprites(void)
 {
     u8 i;
@@ -401,14 +470,7 @@ static void CreateJoinGridSprites(void)
     {
         u8 col = i % 4;
         u8 row = i / 4;
-        u8 spriteId = CreateMonIconNoPersonality(sFaceCodeSpecies[i], SpriteCallbackDummy, sGridX[col], sGridY[row], 1);
-        if (spriteId < MAX_SPRITES)
-        {
-            gSprites[spriteId].animPaused = TRUE;
-            gSprites[spriteId].animBeginning = FALSE;
-            UpdateMonIconFrame(&gSprites[spriteId]);
-            sGridSpriteIds[i] = spriteId;
-        }
+        sGridSpriteIds[i] = CreateFaceIconSprite(i, sGridX[col], sGridY[row], 1);
     }
 
     // Refresh slot sprites for any already selected faces
@@ -417,14 +479,7 @@ static void CreateJoinGridSprites(void)
         u8 speciesIdx = sSelectedFaces[i];
         if (speciesIdx < 16)
         {
-            u8 spriteId = CreateMonIconNoPersonality(sFaceCodeSpecies[speciesIdx], SpriteCallbackDummy, sGridX[i], 36, 0);
-            if (spriteId < MAX_SPRITES)
-            {
-                gSprites[spriteId].animPaused = TRUE;
-                gSprites[spriteId].animBeginning = FALSE;
-                UpdateMonIconFrame(&gSprites[spriteId]);
-                sSlotSpriteIds[i] = spriteId;
-            }
+            sSlotSpriteIds[i] = CreateFaceIconSprite(speciesIdx, sGridX[i], 36, 0);
         }
     }
 
@@ -466,14 +521,7 @@ static void CreateLobbyFaceSprites(void)
             faceIdx = gSoulLink.lobbyResponse.roomCode[i] % 16;
         }
 
-        u8 spriteId = CreateMonIconNoPersonality(sFaceCodeSpecies[faceIdx], SpriteCallbackDummy, sLobbyFaceX[i], 16, 0);
-        if (spriteId < MAX_SPRITES)
-        {
-            gSprites[spriteId].animPaused = TRUE;
-            gSprites[spriteId].animBeginning = FALSE;
-            UpdateMonIconFrame(&gSprites[spriteId]);
-            sLobbyFaceSpriteIds[i] = spriteId;
-        }
+        sLobbyFaceSpriteIds[i] = CreateFaceIconSprite((u8)faceIdx, sLobbyFaceX[i], 16, 0);
     }
 }
 
@@ -548,6 +596,7 @@ void CB2_InitSoulLinkMenu(void)
         LoadPalette(GetWindowFrameTilesPal(gSaveBlock2Ptr->optionsWindowFrameType)->pal, BG_PLTT_ID(7), PLTT_SIZE_4BPP);
         LoadPalette(sSoulLinkText_Pal, BG_PLTT_ID(1), sizeof(sSoulLinkText_Pal));
         LoadMonIconPalettes();
+        InitSoulLinkFaceIcons();
         gMain.state++;
         break;
     case 5:
@@ -598,22 +647,22 @@ static void DrawBgWindowFrames(void)
     FillBgTilemapBufferRect(1, TILE_BOT_EDGE,      2,  3, 26,  1,  7);
     FillBgTilemapBufferRect(1, TILE_BOT_CORNER_R, 28,  3,  1,  1,  7);
 
-    // Draw Body Frame (x=1..28, y=3..15)
+    // Draw Body Frame (x=1..28, y=3..16)
     FillBgTilemapBufferRect(1, TILE_TOP_CORNER_L,  1,  3,  1,  1,  7);
     FillBgTilemapBufferRect(1, TILE_TOP_EDGE,      2,  3, 26,  1,  7);
     FillBgTilemapBufferRect(1, TILE_TOP_CORNER_R, 28,  3,  1,  1,  7);
-    FillBgTilemapBufferRect(1, TILE_LEFT_EDGE,     1,  4,  1, 11,  7);
-    FillBgTilemapBufferRect(1, TILE_RIGHT_EDGE,   28,  4,  1, 11,  7);
-    FillBgTilemapBufferRect(1, TILE_BOT_CORNER_L,  1, 15,  1,  1,  7);
-    FillBgTilemapBufferRect(1, TILE_BOT_EDGE,      2, 15, 26,  1,  7);
-    FillBgTilemapBufferRect(1, TILE_BOT_CORNER_R, 28, 15,  1,  1,  7);
+    FillBgTilemapBufferRect(1, TILE_LEFT_EDGE,     1,  4,  1, 12,  7);
+    FillBgTilemapBufferRect(1, TILE_RIGHT_EDGE,   28,  4,  1, 12,  7);
+    FillBgTilemapBufferRect(1, TILE_BOT_CORNER_L,  1, 16,  1,  1,  7);
+    FillBgTilemapBufferRect(1, TILE_BOT_EDGE,      2, 16, 26,  1,  7);
+    FillBgTilemapBufferRect(1, TILE_BOT_CORNER_R, 28, 16,  1,  1,  7);
 
-    // Draw Footer Frame (x=1..28, y=15..19)
-    FillBgTilemapBufferRect(1, TILE_TOP_CORNER_L,  1, 15,  1,  1,  7);
-    FillBgTilemapBufferRect(1, TILE_TOP_EDGE,      2, 15, 26,  1,  7);
-    FillBgTilemapBufferRect(1, TILE_TOP_CORNER_R, 28, 15,  1,  1,  7);
-    FillBgTilemapBufferRect(1, TILE_LEFT_EDGE,     1, 16,  1,  3,  7);
-    FillBgTilemapBufferRect(1, TILE_RIGHT_EDGE,   28, 16,  1,  3,  7);
+    // Draw Footer Frame (x=1..28, y=16..19)
+    FillBgTilemapBufferRect(1, TILE_TOP_CORNER_L,  1, 16,  1,  1,  7);
+    FillBgTilemapBufferRect(1, TILE_TOP_EDGE,      2, 16, 26,  1,  7);
+    FillBgTilemapBufferRect(1, TILE_TOP_CORNER_R, 28, 16,  1,  1,  7);
+    FillBgTilemapBufferRect(1, TILE_LEFT_EDGE,     1, 17,  1,  2,  7);
+    FillBgTilemapBufferRect(1, TILE_RIGHT_EDGE,   28, 17,  1,  2,  7);
     FillBgTilemapBufferRect(1, TILE_BOT_CORNER_L,  1, 19,  1,  1,  7);
     FillBgTilemapBufferRect(1, TILE_BOT_EDGE,      2, 19, 26,  1,  7);
     FillBgTilemapBufferRect(1, TILE_BOT_CORNER_R, 28, 19,  1,  1,  7);
@@ -756,7 +805,7 @@ static void RenderJoinEntryScreen(void)
     FillWindowPixelBuffer(WIN_BODY, PIXEL_FILL(1));
 
     // Slots header
-    AddTextPrinterParameterized(WIN_BODY, FONT_SMALL, COMPOUND_STRING("CODE:"), 4, 1, TEXT_SKIP_DRAW, NULL);
+    AddTextPrinterParameterized(WIN_BODY, FONT_SMALL, COMPOUND_STRING("CODE:"), 4, 2, TEXT_SKIP_DRAW, NULL);
 
     u8 s;
     for (s = 0; s < 4; s++)
@@ -771,7 +820,7 @@ static void RenderJoinEntryScreen(void)
             slotText[3] = CHAR_SPACE;
             slotText[4] = CHAR_RIGHT_PAREN;
             slotText[5] = EOS;
-            AddTextPrinterParameterized(WIN_BODY, FONT_SMALL, slotText, localX - 10, 1, TEXT_SKIP_DRAW, NULL);
+            AddTextPrinterParameterized(WIN_BODY, FONT_SMALL, slotText, localX - 10, 2, TEXT_SKIP_DRAW, NULL);
         }
     }
 
@@ -781,10 +830,10 @@ static void RenderJoinEntryScreen(void)
     u8 cursorLocalX = sGridX[c] - 16;
     u8 cursorLocalY = sGridY[r] - 32;
 
-    FillWindowPixelRect(WIN_BODY, 2, cursorLocalX - 13, cursorLocalY - 10, 26, 1);
-    FillWindowPixelRect(WIN_BODY, 2, cursorLocalX - 13, cursorLocalY + 9, 26, 1);
-    FillWindowPixelRect(WIN_BODY, 2, cursorLocalX - 13, cursorLocalY - 10, 1, 20);
-    FillWindowPixelRect(WIN_BODY, 2, cursorLocalX + 12, cursorLocalY - 10, 1, 20);
+    FillWindowPixelRect(WIN_BODY, 2, cursorLocalX - 12, cursorLocalY - 9, 24, 1);
+    FillWindowPixelRect(WIN_BODY, 2, cursorLocalX - 12, cursorLocalY + 8, 24, 1);
+    FillWindowPixelRect(WIN_BODY, 2, cursorLocalX - 12, cursorLocalY - 9, 1, 18);
+    FillWindowPixelRect(WIN_BODY, 2, cursorLocalX + 11, cursorLocalY - 9, 1, 18);
 
     CopyWindowToVram(WIN_BODY, COPYWIN_FULL);
 
@@ -1275,14 +1324,7 @@ static void Task_SoulLinkMenu_Main(u8 taskId)
                     FreeAndDestroyMonIconSprite(&gSprites[sSlotSpriteIds[slot]]);
                     sSlotSpriteIds[slot] = MAX_SPRITES;
                 }
-                u8 spriteId = CreateMonIconNoPersonality(sFaceCodeSpecies[sFaceGridCursor], SpriteCallbackDummy, sGridX[slot], 36, 0);
-                if (spriteId < MAX_SPRITES)
-                {
-                    gSprites[spriteId].animPaused = TRUE;
-                    gSprites[spriteId].animBeginning = FALSE;
-                    UpdateMonIconFrame(&gSprites[spriteId]);
-                    sSlotSpriteIds[slot] = spriteId;
-                }
+                sSlotSpriteIds[slot] = CreateFaceIconSprite(sFaceGridCursor, sGridX[slot], 36, 0);
 
                 sNumSelectedFaces++;
                 SoulLink_FormatFaceCodeString(sEnteredCode, sSelectedFaces, 4);
