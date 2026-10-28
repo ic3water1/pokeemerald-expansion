@@ -593,8 +593,15 @@ void LoadOam(void)
         CpuCopy32(gMain.oamBuffer, (void *)OAM, sizeof(gMain.oamBuffer));
 }
 
+#if SOULLINK_DEV_TEST || TESTING
+EWRAM_DATA u16 gSoulLinkTestSpriteCopyHighWater = 0;
+#endif
+
 void ClearSpriteCopyRequests(void)
 {
+#if SOULLINK_DEV_TEST || TESTING
+    gSoulLinkTestSpriteCopyHighWater = 0;
+#endif
     u32 i;
 
     sShouldProcessSpriteCopyRequests = FALSE;
@@ -803,6 +810,10 @@ void RequestSpriteFrameImageCopy(u16 index, u16 tileNum, const struct SpriteFram
         }
         sSpriteCopyRequests[sSpriteCopyRequestCount].dest = (u8 *)OBJ_VRAM0 + TILE_SIZE_4BPP * tileNum;
         sSpriteCopyRequestCount++;
+#if SOULLINK_DEV_TEST || TESTING
+        if (sSpriteCopyRequestCount > gSoulLinkTestSpriteCopyHighWater)
+            gSoulLinkTestSpriteCopyHighWater = sSpriteCopyRequestCount;
+#endif
     }
 }
 
@@ -814,6 +825,10 @@ void RequestSpriteCopy(const u8 *src, u8 *dest, u16 size)
         sSpriteCopyRequests[sSpriteCopyRequestCount].dest = dest;
         sSpriteCopyRequests[sSpriteCopyRequestCount].size = size;
         sSpriteCopyRequestCount++;
+#if SOULLINK_DEV_TEST || TESTING
+        if (sSpriteCopyRequestCount > gSoulLinkTestSpriteCopyHighWater)
+            gSoulLinkTestSpriteCopyHighWater = sSpriteCopyRequestCount;
+#endif
     }
 }
 
