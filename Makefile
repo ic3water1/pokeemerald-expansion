@@ -59,6 +59,9 @@ endif
 ifneq (,$(filter release tidyrelease,$(MAKECMDGOALS)))
   RELEASE := 1
 endif
+ifneq (,$(filter dev tidydev,$(MAKECMDGOALS)))
+  DEV_TEST := 1
+endif
 
 include config.mk
 
@@ -95,12 +98,19 @@ CPP := $(PREFIX)cpp
 ifeq ($(RELEASE),1)
 	FILE_NAME := $(FILE_NAME)-release
 endif
+ifeq ($(DEV_TEST),1)
+	SOULLINK_DEV_TEST := 1
+endif
+ifeq ($(SOULLINK_DEV_TEST),1)
+	FILE_NAME := $(FILE_NAME)-dev
+endif
 
 ROM_NAME := $(FILE_NAME).gba
 OBJ_DIR_NAME := $(BUILD_DIR)/$(BUILD_NAME)
 OBJ_DIR_NAME_TEST := $(BUILD_DIR)/$(BUILD_NAME)-test
 OBJ_DIR_NAME_DEBUG := $(BUILD_DIR)/$(BUILD_NAME)-debug
 OBJ_DIR_NAME_RELEASE := $(BUILD_DIR)/$(BUILD_NAME)-release
+OBJ_DIR_NAME_DEV := $(BUILD_DIR)/$(BUILD_NAME)-dev
 ASSETS_DIR_NAME := $(BUILD_DIR)/assets
 
 ELF_NAME := $(ROM_NAME:.gba=.elf)
@@ -123,6 +133,9 @@ ifeq ($(DEBUG),1)
 endif
 ifeq ($(RELEASE),1)
   OBJ_DIR := $(OBJ_DIR_NAME_RELEASE)
+endif
+ifeq ($(SOULLINK_DEV_TEST),1)
+  OBJ_DIR := $(OBJ_DIR_NAME_DEV)
 endif
 ELF := $(ROM:.gba=.elf)
 MAP := $(ROM:.gba=.map)
@@ -162,6 +175,9 @@ ifeq ($(RELEASE),1)
 	ifeq ($(USE_LTO_ON_RELEASE),1)
 		LTO := 1
 	endif
+endif
+ifeq ($(SOULLINK_DEV_TEST),1)
+	override CPPFLAGS += -DSOULLINK_DEV_TEST=1
 endif
 ARMCC := $(PREFIX)gcc
 PATH_ARMCC := PATH="$(PATH)" $(ARMCC)
@@ -268,8 +284,8 @@ MAKEFLAGS += --no-print-directory
 # Delete files that weren't built properly
 .DELETE_ON_ERROR:
 
-RULES_NO_SCAN += libagbsyscall clean clean-assets tidy tidymodern tidycheck tidyrelease generated clean-generated clean-teachables clean-teachables_intermediates
-.PHONY: all rom agbcc modern compare check debug release
+RULES_NO_SCAN += libagbsyscall clean clean-assets tidy tidymodern tidycheck tidyrelease tidydev generated clean-generated clean-teachables clean-teachables_intermediates
+.PHONY: all rom agbcc modern compare check debug release dev
 .PHONY: $(RULES_NO_SCAN)
 
 infoshell = $(foreach line, $(shell $1 | sed "s/ /__SPACE__/g"), $(info $(subst __SPACE__, ,$(line))))
@@ -335,6 +351,7 @@ modern: all
 compare: all
 debug: all
 release: all
+dev: all
 # Uncomment the next line, and then comment the 4 lines after it to reenable agbcc.
 #agbcc: all
 agbcc:
@@ -385,7 +402,7 @@ clean-assets:
 	find . \( -iname '*.1bpp' -o -iname '*.4bpp' -o -iname '*.8bpp' -o -iname '*.gbapal' -o -iname '*.lz' -o -iname '*.smol' -o -iname '*.fastSmol' -o -iname '*.smolTM' -o -iname '*.rl' -o -iname '*.latfont' -o -iname '*.hwjpnfont' -o -iname '*.fwjpnfont' \) -exec rm {} +
 	find $(DATA_ASM_SUBDIR)/maps \( -iname 'connections.inc' -o -iname 'events.inc' -o -iname 'header.inc' \) -exec rm {} +
 
-tidy: tidymodern tidycheck tidydebug tidyrelease
+tidy: tidymodern tidycheck tidydebug tidyrelease tidydev
 
 tidymodern:
 	rm -f poke*.gba poke*.elf poke*.map
@@ -405,6 +422,14 @@ else # Manually remove the release files on clean/tidy
 	rm -f $(FILE_NAME)-release.gba $(FILE_NAME)-release.elf $(FILE_NAME)-release.map
 endif
 	rm -rf $(OBJ_DIR_NAME_RELEASE)
+
+tidydev:
+ifeq ($(SOULLINK_DEV_TEST),1)
+	rm -f $(ROM_NAME) $(ELF_NAME) $(MAP_NAME)
+else # Manually remove the dev files on clean/tidy
+	rm -f $(FILE_NAME)-dev.gba $(FILE_NAME)-dev.elf $(FILE_NAME)-dev.map
+endif
+	rm -rf $(OBJ_DIR_NAME_DEV)
 
 # Other rules
 include graphics_file_rules.mk

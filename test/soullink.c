@@ -1151,6 +1151,25 @@ TEST("SoulLink: Safe overworld state verification checks callback, fade, battle,
     gMain.callback2 = savedCallback;
 }
 
+TEST("SoulLink: Mailbox flag bit 6 cannot bypass safe overworld check in standard build")
+{
+    MainCallback savedCallback = gMain.callback2;
+    SoulLink_Init();
+    SoulLink_TestSetSafeOverworldOverride(FALSE, FALSE);
+
+    ScriptContext_Init();
+    UnlockPlayerFieldControls();
+    gBattleTypeFlags = 0;
+    gMain.callback2 = NULL; // Unsafe callback
+    gPaletteFade.active = 0;
+
+    // Setting mailbox flag bit 6 must NOT make unsafe overworld state return TRUE
+    gSoulLink.mailboxFlags |= (1 << 6);
+    EXPECT_EQ(SoulLink_IsSafeOverworldState(), FALSE);
+
+    gMain.callback2 = savedCallback;
+}
+
 TEST("SoulLink: Overworld commands execute safely after trainer battle with retained gBattleTypeFlags")
 {
     MainCallback savedCallback = gMain.callback2;
@@ -1370,4 +1389,381 @@ TEST("SoulLink: Session epoch generates distinct non-zero session identity acros
     // Test helper to set epoch
     SoulLink_TestSetSessionEpoch(0x12345678);
     EXPECT_EQ(gSoulLink.sessionEpoch, 0x12345678);
+}
+
+TEST("SoulLink: KILL_MON transfers live party member to Graveyard box and compacts party")
+{
+    u32 i;
+    u8 metLoc101 = MAPSEC_ROUTE_101;
+    u8 metLoc102 = MAPSEC_ROUTE_102;
+    struct SoulLinkCommand cmd;
+
+    SoulLink_Init();
+    SoulLink_NewGame();
+    gPokemonStoragePtr = &gPokemonStorage.block;
+    ResetPokemonStorageSystem();
+
+    // Clear party
+    for (i = 0; i < PARTY_SIZE; i++)
+        ZeroMonData(&gParties[B_TRAINER_PLAYER][i]);
+
+    // Create 2 Pokémon: Treecko on Route 101, Zigzagoon on Route 102
+    CreateMon(&gParties[B_TRAINER_PLAYER][0], SPECIES_TREECKO, 10, 0, OTID_STRUCT_PRESET(0));
+    CalculateMonStats(&gParties[B_TRAINER_PLAYER][0]);
+    SetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_MET_LOCATION, &metLoc101);
+
+    CreateMon(&gParties[B_TRAINER_PLAYER][1], SPECIES_ZIGZAGOON, 5, 0, OTID_STRUCT_PRESET(0));
+    CalculateMonStats(&gParties[B_TRAINER_PLAYER][1]);
+    SetMonData(&gParties[B_TRAINER_PLAYER][1], MON_DATA_MET_LOCATION, &metLoc102);
+
+    gSoulLink.routeState[MAPSEC_ROUTE_101] = ROUTE_STATE_ALIVE;
+    gSoulLink.routeState[MAPSEC_ROUTE_102] = ROUTE_STATE_ALIVE;
+    EXPECT_EQ(SoulLink_GetLivingPokemonCount(), 2);
+    EXPECT_EQ(CountMonsInBox(SOULLINK_GRAVEYARD_BOX), 0);
+
+    // Queue KILL_MON command for Route 102
+    SoulLink_TestSetSafeOverworldOverride(TRUE, TRUE);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.sequenceId = 1;
+    cmd.cmdType = SOULLINK_CMD_KILL_MON;
+    cmd.targetMapSec = MAPSEC_ROUTE_102;
+    cmd.executionStatus = SOULLINK_CMD_STATUS_PENDING;
+
+    EXPECT_EQ(SoulLink_ReceiveCommand(&cmd), TRUE);
+    SoulLink_ProcessOverworldCommands();
+
+    // Verify command executed successfully
+    EXPECT_EQ(gSoulLink.cmdQueue[0].executionStatus, SOULLINK_CMD_STATUS_SUCCESS);
+    EXPECT_EQ(gSoulLink.routeState[MAPSEC_ROUTE_102], ROUTE_STATE_DEAD_FORFEITED);
+
+    // Party should now have 1 living Pokémon (Treecko) and be compacted
+    EXPECT_EQ(SoulLink_GetLivingPokemonCount(), 1);
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_SPECIES), SPECIES_TREECKO);
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][1], MON_DATA_SPECIES), SPECIES_NONE);
+
+    // Graveyard box (Box 14) should now contain the dead Zigzagoon
+    EXPECT_EQ(CountMonsInBox(SOULLINK_GRAVEYARD_BOX), 1);
+    EXPECT_EQ(GetBoxMonDataAt(SOULLINK_GRAVEYARD_BOX, 0, MON_DATA_SPECIES), SPECIES_ZIGZAGOON);
+
+    // Idempotent re-run: replaying command does not duplicate or crash
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.sequenceId = 2;
+    cmd.cmdType = SOULLINK_CMD_KILL_MON;
+    cmd.targetMapSec = MAPSEC_ROUTE_102;
+    cmd.executionStatus = SOULLINK_CMD_STATUS_PENDING;
+
+    EXPECT_EQ(SoulLink_ReceiveCommand(&cmd), TRUE);
+    SoulLink_ProcessOverworldCommands();
+    EXPECT_EQ(gSoulLink.cmdQueue[1].executionStatus, SOULLINK_CMD_STATUS_SUCCESS);
+    EXPECT_EQ(CountMonsInBox(SOULLINK_GRAVEYARD_BOX), 1); // Still exactly 1
+}
+
+TEST("SoulLink: KILL_MON transfers PC-stored Pokemon to Graveyard box and zeroes original box slot")
+{
+    u32 i;
+    u8 metLoc101 = MAPSEC_ROUTE_101;
+    u8 metLoc103 = MAPSEC_ROUTE_103;
+    struct Pokemon tempMon;
+    struct SoulLinkCommand cmd;
+
+    SoulLink_Init();
+    SoulLink_NewGame();
+    gPokemonStoragePtr = &gPokemonStorage.block;
+    ResetPokemonStorageSystem();
+
+    // Clear party
+    for (i = 0; i < PARTY_SIZE; i++)
+        ZeroMonData(&gParties[B_TRAINER_PLAYER][i]);
+
+    // Active party mon on Route 101
+    CreateMon(&gParties[B_TRAINER_PLAYER][0], SPECIES_TREECKO, 10, 0, OTID_STRUCT_PRESET(0));
+    CalculateMonStats(&gParties[B_TRAINER_PLAYER][0]);
+    SetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_MET_LOCATION, &metLoc101);
+
+    // Boxed mon on Route 103 in Box 2, Slot 5
+    CreateMon(&tempMon, SPECIES_WINGULL, 7, 0, OTID_STRUCT_PRESET(0));
+    CalculateMonStats(&tempMon);
+    SetMonData(&tempMon, MON_DATA_MET_LOCATION, &metLoc103);
+    SetBoxMonAt(2, 5, &tempMon.box);
+
+    EXPECT_EQ(GetBoxMonDataAt(2, 5, MON_DATA_SPECIES), SPECIES_WINGULL);
+    EXPECT_EQ(CountMonsInBox(SOULLINK_GRAVEYARD_BOX), 0);
+    gSoulLink.routeState[MAPSEC_ROUTE_103] = ROUTE_STATE_ALIVE;
+
+    // Queue KILL_MON command for Route 103
+    SoulLink_TestSetSafeOverworldOverride(TRUE, TRUE);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.sequenceId = 1;
+    cmd.cmdType = SOULLINK_CMD_KILL_MON;
+    cmd.targetMapSec = MAPSEC_ROUTE_103;
+    cmd.executionStatus = SOULLINK_CMD_STATUS_PENDING;
+
+    EXPECT_EQ(SoulLink_ReceiveCommand(&cmd), TRUE);
+    SoulLink_ProcessOverworldCommands();
+
+    // Verify command succeeded
+    EXPECT_EQ(gSoulLink.cmdQueue[0].executionStatus, SOULLINK_CMD_STATUS_SUCCESS);
+    EXPECT_EQ(gSoulLink.routeState[MAPSEC_ROUTE_103], ROUTE_STATE_DEAD_FORFEITED);
+
+    // Box 2, Slot 5 should now be empty (zeroed)
+    EXPECT_EQ(GetBoxMonDataAt(2, 5, MON_DATA_SPECIES), SPECIES_NONE);
+
+    // Graveyard box should contain the Wingull
+    EXPECT_EQ(CountMonsInBox(SOULLINK_GRAVEYARD_BOX), 1);
+    EXPECT_EQ(GetBoxMonDataAt(SOULLINK_GRAVEYARD_BOX, 0, MON_DATA_SPECIES), SPECIES_WINGULL);
+}
+
+TEST("SoulLink: Gym progression unlocks locally in solo play, but strictly requires coordinator command in multiplayer run")
+{
+    SoulLink_Init();
+    SoulLink_NewGame();
+    EXPECT_EQ(gSoulLink.unlockedGymStage, 0);
+
+    // Case 1: Solo offline play (adapter offline, runState lobby) -> local badge unlocks gym stage
+    gSoulLink.transportState = SOULLINK_TRANSPORT_OFFLINE;
+    gSoulLink.lobbyResponse.runState = SOULLINK_RUN_STATE_LOBBY;
+    EXPECT_EQ(SoulLink_IsMultiplayerActive(), FALSE);
+
+    FlagSet(FLAG_BADGE01_GET);
+    SoulLink_OnBadgeEarned();
+    EXPECT_EQ(gSoulLink.unlockedGymStage, 1);
+
+    // Case 2: Solo play with adapter connected (transport connected, but no multiplayer room run)
+    // Connecting the adapter while playing solo must NOT block normal Gym progression!
+    gSoulLink.transportState = SOULLINK_TRANSPORT_CONNECTED;
+    gSoulLink.lobbyResponse.runState = SOULLINK_RUN_STATE_LOBBY;
+    EXPECT_EQ(SoulLink_IsMultiplayerActive(), FALSE);
+
+    FlagSet(FLAG_BADGE02_GET);
+    SoulLink_OnBadgeEarned();
+    EXPECT_EQ(gSoulLink.unlockedGymStage, 2);
+
+    // Case 3: Multiplayer run active -> local badge 3 does NOT advance unlockedGymStage!
+    gSoulLink.lobbyResponse.runState = SOULLINK_RUN_STATE_IN_PROGRESS;
+    EXPECT_EQ(SoulLink_IsMultiplayerActive(), TRUE);
+
+    FlagSet(FLAG_BADGE03_GET);
+    SoulLink_OnBadgeEarned();
+    // Must REMAIN at stage 2 until coordinator issues UNLOCK_GYM!
+    EXPECT_EQ(gSoulLink.unlockedGymStage, 2);
+
+    // Case 4: Temporary loss of transport connection during active multiplayer run
+    // Must NOT silently disable multiplayer progression restrictions!
+    gSoulLink.transportState = SOULLINK_TRANSPORT_DISCONNECTED;
+    EXPECT_EQ(SoulLink_IsMultiplayerActive(), TRUE);
+
+    FlagSet(FLAG_BADGE04_GET);
+    SoulLink_OnBadgeEarned();
+    EXPECT_EQ(gSoulLink.unlockedGymStage, 2); // Still locked at stage 2!
+
+    // Case 5: Coordinator sends authoritative UNLOCK_GYM stage 3 command
+    struct SoulLinkCommand cmd;
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.sequenceId = 1;
+    cmd.cmdType = SOULLINK_CMD_UNLOCK_GYM;
+    cmd.paramValue = 3;
+    cmd.executionStatus = SOULLINK_CMD_STATUS_PENDING;
+
+    SoulLink_TestSetSafeOverworldOverride(TRUE, TRUE);
+    EXPECT_EQ(SoulLink_ReceiveCommand(&cmd), TRUE);
+    SoulLink_ProcessOverworldCommands();
+
+    EXPECT_EQ(gSoulLink.cmdQueue[0].executionStatus, SOULLINK_CMD_STATUS_SUCCESS);
+    EXPECT_EQ(gSoulLink.unlockedGymStage, 3);
+}
+
+TEST("SoulLink: KILL_MON defers execution when Graveyard box is full without deleting Pokemon data")
+{
+    u32 i;
+    u8 metLoc102 = MAPSEC_ROUTE_102;
+    struct Pokemon fillerMon;
+    struct SoulLinkCommand cmd;
+
+    SoulLink_Init();
+    SoulLink_NewGame();
+    gPokemonStoragePtr = &gPokemonStorage.block;
+    ResetPokemonStorageSystem();
+
+    for (i = 0; i < PARTY_SIZE; i++)
+        ZeroMonData(&gParties[B_TRAINER_PLAYER][i]);
+
+    // Fill Graveyard box (Box 14) to capacity (IN_BOX_COUNT = 30)
+    for (i = 0; i < IN_BOX_COUNT; i++)
+    {
+        CreateMon(&fillerMon, SPECIES_POOCHYENA, 5, 0, OTID_STRUCT_PRESET(0));
+        SetBoxMonAt(SOULLINK_GRAVEYARD_BOX, i, &fillerMon.box);
+    }
+    EXPECT_EQ(CountMonsInBox(SOULLINK_GRAVEYARD_BOX), IN_BOX_COUNT);
+    EXPECT_EQ(GetFirstFreeBoxSpot(SOULLINK_GRAVEYARD_BOX), -1);
+
+    // Create player's living party mon on Route 102
+    CreateMon(&gParties[B_TRAINER_PLAYER][0], SPECIES_ZIGZAGOON, 5, 0, OTID_STRUCT_PRESET(0));
+    CalculateMonStats(&gParties[B_TRAINER_PLAYER][0]);
+    SetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_MET_LOCATION, &metLoc102);
+
+    gSoulLink.routeState[MAPSEC_ROUTE_102] = ROUTE_STATE_ALIVE;
+    gSoulLink.lastExecutedCmdSequenceId = 10;
+
+    // Queue KILL_MON command for Route 102
+    SoulLink_TestSetSafeOverworldOverride(TRUE, TRUE);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.sequenceId = 11;
+    cmd.cmdType = SOULLINK_CMD_KILL_MON;
+    cmd.targetMapSec = MAPSEC_ROUTE_102;
+    cmd.executionStatus = SOULLINK_CMD_STATUS_PENDING;
+
+    EXPECT_EQ(SoulLink_ReceiveCommand(&cmd), TRUE);
+    SoulLink_ProcessOverworldCommands();
+
+    // Must be DEFERRED: cannot safely complete Graveyard transfer!
+    EXPECT_EQ(gSoulLink.cmdQueue[0].executionStatus, SOULLINK_CMD_STATUS_DEFERRED);
+    // lastExecutedCmdSequenceId must NOT advance on deferred execution
+    EXPECT_EQ(gSoulLink.lastExecutedCmdSequenceId, 10);
+
+    // Party mon data is NOT deleted!
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_SPECIES), SPECIES_ZIGZAGOON);
+    // HP is set to 0 to preserve permanent death restriction
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_HP), 0);
+}
+
+TEST("SoulLink: KILL_MON defers execution when PC storage is unavailable and executes when restored")
+{
+    u32 i;
+    u8 metLoc102 = MAPSEC_ROUTE_102;
+    struct PokemonStorage *savedStorage = gPokemonStoragePtr;
+
+    SoulLink_Init();
+    SoulLink_NewGame();
+    gPokemonStoragePtr = &gPokemonStorage.block;
+    ResetPokemonStorageSystem();
+    EXPECT_EQ(CountMonsInBox(SOULLINK_GRAVEYARD_BOX), 0);
+
+    for (i = 0; i < PARTY_SIZE; i++)
+        ZeroMonData(&gParties[B_TRAINER_PLAYER][i]);
+
+    CreateMon(&gParties[B_TRAINER_PLAYER][0], SPECIES_ZIGZAGOON, 5, 0, OTID_STRUCT_PRESET(0));
+    CalculateMonStats(&gParties[B_TRAINER_PLAYER][0]);
+    SetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_MET_LOCATION, &metLoc102);
+
+    // PC storage becomes unavailable
+    gPokemonStoragePtr = NULL;
+    EXPECT_EQ(SoulLink_ApplyKillMon(MAPSEC_ROUTE_102, SPECIES_ZIGZAGOON), SOULLINK_CMD_STATUS_DEFERRED);
+
+    // Restore PC storage and re-execute
+    gPokemonStoragePtr = &gPokemonStorage.block;
+    EXPECT_EQ(SoulLink_ApplyKillMon(MAPSEC_ROUTE_102, SPECIES_ZIGZAGOON), SOULLINK_CMD_STATUS_SUCCESS);
+    EXPECT_EQ(CountMonsInBox(SOULLINK_GRAVEYARD_BOX), 1);
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_SPECIES), SPECIES_NONE);
+
+    gPokemonStoragePtr = savedStorage;
+}
+
+TEST("SoulLink: Out-of-order execution allows older DEFERRED command to execute successfully after newer command succeeds")
+{
+    u32 i;
+    u8 metLoc102 = MAPSEC_ROUTE_102;
+    struct PokemonStorage *savedStorage = gPokemonStoragePtr;
+    struct SoulLinkCommand cmd1;
+    struct SoulLinkCommand cmd2;
+    struct SoulLinkCommand cmdRetry;
+    struct SoulLinkCommand cmdDup;
+
+    SoulLink_Init();
+    SoulLink_NewGame();
+    gPokemonStoragePtr = &gPokemonStorage.block;
+    ResetPokemonStorageSystem();
+    EXPECT_EQ(CountMonsInBox(SOULLINK_GRAVEYARD_BOX), 0);
+
+    for (i = 0; i < PARTY_SIZE; i++)
+        ZeroMonData(&gParties[B_TRAINER_PLAYER][i]);
+
+    // 1. Create living mon caught on Route 102
+    CreateMon(&gParties[B_TRAINER_PLAYER][0], SPECIES_ZIGZAGOON, 5, 0, OTID_STRUCT_PRESET(0));
+    CalculateMonStats(&gParties[B_TRAINER_PLAYER][0]);
+    SetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_MET_LOCATION, &metLoc102);
+
+    gSoulLink.routeState[MAPSEC_ROUTE_102] = ROUTE_STATE_ALIVE;
+    gSoulLink.routeState[MAPSEC_ROUTE_103] = ROUTE_STATE_OPEN;
+    SoulLink_TestSetSafeOverworldOverride(TRUE, TRUE);
+
+    // 2. Step 1: Storage is temporarily unavailable
+    gPokemonStoragePtr = NULL;
+
+    memset(&cmd1, 0, sizeof(cmd1));
+    cmd1.sequenceId = 1;
+    cmd1.cmdType = SOULLINK_CMD_KILL_MON;
+    cmd1.targetMapSec = MAPSEC_ROUTE_102;
+    cmd1.executionStatus = SOULLINK_CMD_STATUS_PENDING;
+
+    EXPECT_EQ(SoulLink_ReceiveCommand(&cmd1), TRUE);
+    SoulLink_ProcessOverworldCommands();
+
+    // Command 1 must be DEFERRED, lastExecutedCmdSequenceId must remain 0
+    EXPECT_EQ(gSoulLink.cmdQueue[0].executionStatus, SOULLINK_CMD_STATUS_DEFERRED);
+    EXPECT_EQ(gSoulLink.lastExecutedCmdSequenceId, 0);
+    // Mon is still in party, zeroed HP for safety, mon data preserved
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_SPECIES), SPECIES_ZIGZAGOON);
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_HP), 0);
+
+    // 3. Step 2: Newer Command 2 (LOCK_ROUTE for Route 103) arrives and succeeds
+    memset(&cmd2, 0, sizeof(cmd2));
+    cmd2.sequenceId = 2;
+    cmd2.cmdType = SOULLINK_CMD_LOCK_ROUTE;
+    cmd2.targetMapSec = MAPSEC_ROUTE_103;
+    cmd2.executionStatus = SOULLINK_CMD_STATUS_PENDING;
+
+    EXPECT_EQ(SoulLink_ReceiveCommand(&cmd2), TRUE);
+    SoulLink_ProcessOverworldCommands();
+
+    // Command 2 succeeded, advancing lastExecutedCmdSequenceId to 2
+    EXPECT_EQ(gSoulLink.cmdQueue[1].executionStatus, SOULLINK_CMD_STATUS_SUCCESS);
+    EXPECT_EQ(gSoulLink.lastExecutedCmdSequenceId, 2);
+    EXPECT_EQ(gSoulLink.routeState[MAPSEC_ROUTE_103], ROUTE_STATE_DEAD_FORFEITED);
+
+    // 4. Step 3: Storage becomes available again, coordinator re-delivers Command 1 (seq 1 < 2)
+    gPokemonStoragePtr = &gPokemonStorage.block;
+
+    memset(&cmdRetry, 0, sizeof(cmdRetry));
+    cmdRetry.sequenceId = 1; // Older sequence than lastExecutedCmdSequenceId (2)
+    cmdRetry.cmdType = SOULLINK_CMD_KILL_MON;
+    cmdRetry.targetMapSec = MAPSEC_ROUTE_102;
+    cmdRetry.executionStatus = SOULLINK_CMD_STATUS_PENDING;
+
+    EXPECT_EQ(SoulLink_ReceiveCommand(&cmdRetry), TRUE);
+    SoulLink_ProcessOverworldCommands();
+
+    // Command 1 MUST execute successfully, NOT be falsely classified as DUPLICATE!
+    EXPECT_EQ(gSoulLink.cmdQueue[2].executionStatus, SOULLINK_CMD_STATUS_SUCCESS);
+    EXPECT_EQ(gSoulLink.lastExecutedCmdSequenceId, 2); // Stays at 2
+    EXPECT_EQ(gSoulLink.routeState[MAPSEC_ROUTE_102], ROUTE_STATE_DEAD_FORFEITED);
+    EXPECT_EQ(CountMonsInBox(SOULLINK_GRAVEYARD_BOX), 1);
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_SPECIES), SPECIES_NONE);
+
+    // 5. Step 4: Redelivery of Command 1 now that it has completed must be classified as DUPLICATE
+    memset(&cmdDup, 0, sizeof(cmdDup));
+    cmdDup.sequenceId = 1;
+    cmdDup.cmdType = SOULLINK_CMD_KILL_MON;
+    cmdDup.targetMapSec = MAPSEC_ROUTE_102;
+    cmdDup.executionStatus = SOULLINK_CMD_STATUS_PENDING;
+
+    EXPECT_EQ(SoulLink_ReceiveCommand(&cmdDup), TRUE);
+    SoulLink_ProcessOverworldCommands();
+
+    EXPECT_EQ(gSoulLink.cmdQueue[3].executionStatus, SOULLINK_CMD_STATUS_DUPLICATE);
+    EXPECT_EQ(CountMonsInBox(SOULLINK_GRAVEYARD_BOX), 1); // No extra transfers
+
+    // 6. Step 5: Redelivery of Command 2 must also be classified as DUPLICATE
+    memset(&cmdDup, 0, sizeof(cmdDup));
+    cmdDup.sequenceId = 2;
+    cmdDup.cmdType = SOULLINK_CMD_LOCK_ROUTE;
+    cmdDup.targetMapSec = MAPSEC_ROUTE_103;
+    cmdDup.executionStatus = SOULLINK_CMD_STATUS_PENDING;
+
+    EXPECT_EQ(SoulLink_ReceiveCommand(&cmdDup), TRUE);
+    SoulLink_ProcessOverworldCommands();
+
+    EXPECT_EQ(gSoulLink.cmdQueue[4].executionStatus, SOULLINK_CMD_STATUS_DUPLICATE);
+
+    SoulLink_TestSetSafeOverworldOverride(FALSE, FALSE);
+    gPokemonStoragePtr = savedStorage;
 }

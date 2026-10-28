@@ -2,6 +2,7 @@
 
 #if __has_include("global.h")
 #include "global.h"
+#include "main.h"
 #include "overworld.h"
 #include "battle.h"
 #include "battle_util.h"
@@ -14,6 +15,8 @@
 #include "event_data.h"
 #include "palette.h"
 #include "script.h"
+#include "load_save.h"
+#include "constants/species.h"
 #else
 struct MapHeader {
     u8 regionMapSectionId;
@@ -29,6 +32,9 @@ static u16 sNextEventSequenceId;
 static u16 sNextCmdSequenceId;
 static u16 sNextLobbyRequestId;
 static u8 sFaintedPartyMask;
+
+static u16 sDeferredCmdSeqs[SOULLINK_CMD_QUEUE_SIZE];
+static u8 sDeferredCmdCount;
 
 #if TESTING
 static bool8 sTestSafeOverworldOverrideEnabled;
@@ -100,6 +106,8 @@ void SoulLink_Init(void)
     gSoulLink.cmdTail = 0;
     gSoulLink.lastExecutedCmdSequenceId = 0;
     gSoulLink.cmdDropCount = 0;
+    sDeferredCmdCount = 0;
+    memset(sDeferredCmdSeqs, 0, sizeof(sDeferredCmdSeqs));
     memset(gSoulLink.cmdQueue, 0, sizeof(gSoulLink.cmdQueue));
 
     // Clear lobby request and response
@@ -199,10 +207,14 @@ void SoulLink_LoadFromSaveBlock3(void)
         }
 
         // Synchronize unlocked gym stage with in-game badge count if badges exceed saved stage
-        badges = SoulLink_GetBadgeCount();
-        if (badges > gSoulLink.unlockedGymStage)
+        // In multiplayer, unlockedGymStage is authoritatively controlled by the coordinator
+        if (!SoulLink_IsMultiplayerActive())
         {
-            gSoulLink.unlockedGymStage = badges;
+            badges = SoulLink_GetBadgeCount();
+            if (badges > gSoulLink.unlockedGymStage)
+            {
+                gSoulLink.unlockedGymStage = badges;
+            }
         }
     }
 #endif
@@ -841,14 +853,31 @@ u8 SoulLink_GetBadgeCount(void)
 }
 
 /**
+ * Checks whether an active multiplayer Soul Link session is currently running.
+ * Distinguishes a connected transport from an active multiplayer run:
+ * - Connecting the adapter while playing solo does NOT block normal Gym progression.
+ * - An active run requires lobbyResponse.runState == SOULLINK_RUN_STATE_IN_PROGRESS.
+ * - Loss of transport connection during an active run preserves multiplayer restrictions.
+ */
+bool8 SoulLink_IsMultiplayerActive(void)
+{
+    return (gSoulLink.lobbyResponse.runState == SOULLINK_RUN_STATE_IN_PROGRESS);
+}
+
+/**
  * Called when a Gym Badge is earned by the player (script special: SoulLink_OnBadgeEarned).
+ * In multiplayer mode, group gym progression is authoritatively unlocked by the coordinator
+ * via SOULLINK_CMD_UNLOCK_GYM. Do not advance unlockedGymStage locally!
  */
 void SoulLink_OnBadgeEarned(void)
 {
     u8 badges = SoulLink_GetBadgeCount();
-    if (badges > gSoulLink.unlockedGymStage)
+    if (!SoulLink_IsMultiplayerActive())
     {
-        gSoulLink.unlockedGymStage = badges;
+        if (badges > gSoulLink.unlockedGymStage)
+        {
+            gSoulLink.unlockedGymStage = badges;
+        }
     }
     SoulLink_SaveToSaveBlock3();
     SoulLink_EmitEvent(SOULLINK_EVENT_BADGE, gMapHeader.regionMapSectionId, 0, 0, badges);
@@ -924,6 +953,13 @@ bool8 SoulLink_IsSafeOverworldState(void)
     }
 #endif
 
+#if SOULLINK_DEV_TEST
+    if ((gSoulLink.mailboxFlags & SOULLINK_FLAG_DEV_SAFE_OVERWORLD) != 0)
+    {
+        return TRUE;
+    }
+#endif
+
 #if __has_include("global.h")
     // Note: gBattleTypeFlags is intentionally NOT checked here because the game engine
     // retains trainer battle flags even after safely returning to the overworld.
@@ -943,43 +979,256 @@ bool8 SoulLink_IsSafeOverworldState(void)
 #endif
 }
 
+static u32 SequenceForwardDistance(u16 from, u16 to)
+{
+    if (from == 0 || to == 0)
+        return 0;
+    if (to >= from)
+        return (u32)(to - from);
+    else
+        return (u32)(to + 65535 - from);
+}
+
 /**
- * Checks whether an incoming command sequence is duplicate or stale relative to lastExecuted.
- * Uses modular arithmetic over the non-zero sequence space [1, 65535] (modulus 65535).
- * Returns TRUE if cmdSeq is duplicate or stale, FALSE if fresh.
+ * Checks whether an incoming command sequence has already been executed or is stale.
+ * Supports out-of-order execution and retries of previously DEFERRED commands:
+ * - A command is duplicate IF AND ONLY IF it has already successfully completed execution.
+ * - An older command that was DEFERRED is preserved in sDeferredCmdSeqs, allowing
+ *   it to execute successfully even after a newer sequence has succeeded.
  */
-static bool8 IsCommandSequenceDuplicateOrStale(u16 cmdSeq, u16 lastExecuted)
+static bool8 IsCommandSequenceDuplicateOrStale(u16 cmdSeq)
 {
     u32 diff;
+    u32 i;
 
     if (cmdSeq == 0)
     {
         return TRUE; // 0 is unassigned/invalid
     }
 
-    if (lastExecuted == 0)
+    // If this command sequence was previously DEFERRED and hasn't succeeded yet,
+    // allow it to retry and execute!
+    for (i = 0; i < sDeferredCmdCount; i++)
+    {
+        if (sDeferredCmdSeqs[i] == cmdSeq)
+        {
+            return FALSE;
+        }
+    }
+
+    if (gSoulLink.lastExecutedCmdSequenceId == 0)
     {
         return FALSE; // Fresh first command of the session
     }
 
-    if (cmdSeq == lastExecuted)
+    if (cmdSeq == gSoulLink.lastExecutedCmdSequenceId)
     {
         return TRUE; // Exact duplicate
     }
 
     // Sequence numbers skip 0 on wraparound, operating over the space [1, 65535] (modulus 65535).
-    // Calculate forward modular distance from lastExecuted to cmdSeq.
-    diff = (cmdSeq >= lastExecuted)
-         ? (u32)(cmdSeq - lastExecuted)
-         : (u32)(cmdSeq + 65535 - lastExecuted);
+    diff = SequenceForwardDistance(gSoulLink.lastExecutedCmdSequenceId, cmdSeq);
 
-    // If forward distance > 32767, cmdSeq lies in the past half-space (stale)
-    if (diff > 32767)
+    // If forward distance is <= 32767, this is a fresh forward sequence.
+    // If forward distance is > 32767, this sequence lies in the past half-space (duplicate or stale).
+    return (diff > 32767);
+}
+
+/**
+ * Records successful execution of a command sequence.
+ */
+static void RecordCommandExecutionSuccess(u16 cmdSeq)
+{
+    u32 i, j;
+    u32 diff;
+
+    if (cmdSeq == 0)
+        return;
+
+    // Remove from deferred queue if present
+    for (i = 0; i < sDeferredCmdCount; i++)
     {
-        return TRUE;
+        if (sDeferredCmdSeqs[i] == cmdSeq)
+        {
+            for (j = i; j + 1 < sDeferredCmdCount; j++)
+            {
+                sDeferredCmdSeqs[j] = sDeferredCmdSeqs[j + 1];
+            }
+            sDeferredCmdCount--;
+            break;
+        }
     }
 
-    return FALSE; // Fresh forward sequence
+    if (gSoulLink.lastExecutedCmdSequenceId == 0)
+    {
+        gSoulLink.lastExecutedCmdSequenceId = cmdSeq;
+        return;
+    }
+
+    diff = SequenceForwardDistance(gSoulLink.lastExecutedCmdSequenceId, cmdSeq);
+
+    if (diff > 0 && diff <= 32767)
+    {
+        gSoulLink.lastExecutedCmdSequenceId = cmdSeq;
+    }
+}
+
+/**
+ * Records a deferred command sequence for future retry.
+ */
+static void RecordCommandDeferred(u16 cmdSeq)
+{
+    u32 i;
+    if (cmdSeq == 0)
+        return;
+
+    for (i = 0; i < sDeferredCmdCount; i++)
+    {
+        if (sDeferredCmdSeqs[i] == cmdSeq)
+            return;
+    }
+
+    if (sDeferredCmdCount < SOULLINK_CMD_QUEUE_SIZE)
+    {
+        sDeferredCmdSeqs[sDeferredCmdCount++] = cmdSeq;
+    }
+}
+
+/**
+ * Real ROM enforcement for SOULLINK_CMD_KILL_MON.
+ * Identifies the linked Pokémon by stored encounter/link identity across party and PC storage,
+ * permanently sets its HP to 0, moves it to the Graveyard box (Box 14), zeroes the source slot,
+ * and compacts party slots.
+ *
+ * Safety & Durability:
+ * - Returns SOULLINK_CMD_STATUS_REJECTED if targetMapSec is out of bounds.
+ * - Returns SOULLINK_CMD_STATUS_DEFERRED if PC storage is unavailable or Graveyard box is full,
+ *   preserving Pokémon data and fainted restrictions without falsely acknowledging enforcement.
+ * - Returns SOULLINK_CMD_STATUS_SUCCESS only when required state changes safely complete.
+ */
+u8 SoulLink_ApplyKillMon(u8 targetMapSec, u16 species)
+{
+#if __has_include("global.h")
+    s32 i;
+    bool8 anyPartyMoved = FALSE;
+    bool8 transferDeferred = (gPokemonStoragePtr == NULL);
+
+    if (targetMapSec >= NUM_MAPSECS)
+        return SOULLINK_CMD_STATUS_REJECTED;
+
+    // 1. Search player party for Pokémon encountered on targetMapSec
+    for (i = (s32)PARTY_SIZE - 1; i >= 0; i--)
+    {
+        struct Pokemon *mon = &gParties[B_TRAINER_PLAYER][i];
+        u16 monSpecies = GetMonData(mon, MON_DATA_SPECIES);
+        if (monSpecies == SPECIES_NONE || GetMonData(mon, MON_DATA_IS_EGG))
+            continue;
+
+        u16 encounterId = SoulLink_GetEncounterIdForMon(mon);
+        if (encounterId == targetMapSec)
+        {
+            u16 zeroHp = 0;
+            s16 freeSpot = -1;
+
+            // Zero HP immediately so fainted/dead mon cannot be used in battle
+            SetMonData(mon, MON_DATA_HP, &zeroHp);
+
+            if (gPokemonStoragePtr != NULL)
+            {
+                freeSpot = GetFirstFreeBoxSpot(SOULLINK_GRAVEYARD_BOX);
+            }
+
+            if (freeSpot != -1)
+            {
+                SetBoxMonAt(SOULLINK_GRAVEYARD_BOX, freeSpot, &mon->box);
+                ZeroMonData(mon);
+                anyPartyMoved = TRUE;
+            }
+            else
+            {
+                // Graveyard box is full or storage unavailable: retain in party at 0 HP so data is not lost,
+                // and defer command so it is not prematurely acknowledged.
+                transferDeferred = TRUE;
+            }
+        }
+    }
+
+    if (anyPartyMoved)
+    {
+        CompactPartySlots();
+    }
+
+    // 2. Search PC storage boxes (excluding Graveyard box)
+    if (gPokemonStoragePtr != NULL)
+    {
+        s32 boxId, boxPos;
+        for (boxId = 0; boxId < TOTAL_BOXES_COUNT; boxId++)
+        {
+            if (boxId == SOULLINK_GRAVEYARD_BOX)
+                continue;
+
+            for (boxPos = 0; boxPos < IN_BOX_COUNT; boxPos++)
+            {
+                u16 boxSpecies = GetBoxMonDataAt(boxId, boxPos, MON_DATA_SPECIES);
+                if (boxSpecies == SPECIES_NONE || GetBoxMonDataAt(boxId, boxPos, MON_DATA_IS_EGG))
+                    continue;
+
+                u8 metLoc = (u8)GetBoxMonDataAt(boxId, boxPos, MON_DATA_MET_LOCATION);
+                if (metLoc == targetMapSec)
+                {
+                    struct BoxPokemon *boxMon = GetBoxedMonPtr(boxId, boxPos);
+                    s16 freeSpot = GetFirstFreeBoxSpot(SOULLINK_GRAVEYARD_BOX);
+                    if (freeSpot != -1)
+                    {
+                        SetBoxMonAt(SOULLINK_GRAVEYARD_BOX, freeSpot, boxMon);
+                        ZeroBoxMonAt(boxId, boxPos);
+                    }
+                    else
+                    {
+                        // Graveyard box full: cannot transfer from PC
+                        transferDeferred = TRUE;
+                    }
+                }
+            }
+        }
+    }
+
+    if (transferDeferred)
+    {
+        return SOULLINK_CMD_STATUS_DEFERRED;
+    }
+
+    // 3. Mark route state as dead and persist to SaveBlock3
+    gSoulLink.routeState[targetMapSec] = ROUTE_STATE_DEAD_FORFEITED;
+    SoulLink_SaveToSaveBlock3();
+
+    // 4. Check if party is completely wiped of living Pokémon
+    if (SoulLink_IsPartyWiped())
+    {
+        if (SoulLink_GetLivingBoxPokemonCount() > 0)
+        {
+#if !TESTING
+            SetMainCallback2(CB2_WhiteOut);
+#endif
+        }
+        else
+        {
+            SoulLink_EmitEvent(SOULLINK_EVENT_WIPE, targetMapSec, 0, 0, 0);
+#if !TESTING
+            SetMainCallback2(CB2_WhiteOut);
+#endif
+        }
+    }
+
+    return SOULLINK_CMD_STATUS_SUCCESS;
+#else
+    if (targetMapSec < NUM_MAPSECS)
+    {
+        gSoulLink.routeState[targetMapSec] = ROUTE_STATE_DEAD_FORFEITED;
+        return SOULLINK_CMD_STATUS_SUCCESS;
+    }
+    return SOULLINK_CMD_STATUS_REJECTED;
+#endif
 }
 
 /**
@@ -994,6 +1243,35 @@ void SoulLink_ProcessOverworldCommands(void)
         return;
     }
 
+#if SOULLINK_DEV_TEST
+#if __has_include("global.h")
+    if ((gSoulLink.mailboxFlags & SOULLINK_FLAG_DEV_SAFE_OVERWORLD) != 0)
+    {
+        if (gPokemonStoragePtr == NULL)
+        {
+            gPokemonStoragePtr = &gPokemonStorage.block;
+            ResetPokemonStorageSystem();
+        }
+        else if (GetBoxMonDataAt(SOULLINK_GRAVEYARD_BOX, 0, MON_DATA_SPECIES) == SPECIES_NONE &&
+                 GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_SPECIES) == SPECIES_NONE &&
+                 gSoulLink.routeState[MAPSEC_ROUTE_103] == ROUTE_STATE_OPEN)
+        {
+            ResetPokemonStorageSystem();
+        }
+
+        if (GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_SPECIES) == SPECIES_NONE &&
+            gSoulLink.routeState[MAPSEC_ROUTE_103] == ROUTE_STATE_OPEN)
+        {
+            u8 metLoc = MAPSEC_ROUTE_103;
+            CreateMon(&gParties[B_TRAINER_PLAYER][0], SPECIES_TREECKO, 10, 0xA1B2C3D4, OTID_STRUCT_PRESET(0));
+            CalculateMonStats(&gParties[B_TRAINER_PLAYER][0]);
+            SetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_MET_LOCATION, &metLoc);
+            gSoulLink.routeState[MAPSEC_ROUTE_103] = ROUTE_STATE_ALIVE;
+        }
+    }
+#endif
+#endif
+
     // Drain reliable command ring buffer
     while (gSoulLink.cmdTail != gSoulLink.cmdHead)
     {
@@ -1001,7 +1279,7 @@ void SoulLink_ProcessOverworldCommands(void)
         struct SoulLinkCommand *cmd = &gSoulLink.cmdQueue[slot];
 
         // Wrap-safe Replay & Duplicate Protection
-        if (IsCommandSequenceDuplicateOrStale(cmd->sequenceId, gSoulLink.lastExecutedCmdSequenceId))
+        if (IsCommandSequenceDuplicateOrStale(cmd->sequenceId))
         {
             cmd->executionStatus = SOULLINK_CMD_STATUS_DUPLICATE;
             gSoulLink.cmdTail++;
@@ -1011,6 +1289,9 @@ void SoulLink_ProcessOverworldCommands(void)
         switch (cmd->cmdType)
         {
         case SOULLINK_CMD_KILL_MON:
+            cmd->executionStatus = SoulLink_ApplyKillMon((u8)cmd->targetMapSec, cmd->paramValue);
+            break;
+
         case SOULLINK_CMD_LOCK_ROUTE:
             if (cmd->targetMapSec >= NUM_MAPSECS)
             {
@@ -1019,6 +1300,7 @@ void SoulLink_ProcessOverworldCommands(void)
             else
             {
                 gSoulLink.routeState[cmd->targetMapSec] = ROUTE_STATE_DEAD_FORFEITED;
+                SoulLink_SaveToSaveBlock3();
                 cmd->executionStatus = SOULLINK_CMD_STATUS_SUCCESS;
             }
             break;
@@ -1060,7 +1342,11 @@ void SoulLink_ProcessOverworldCommands(void)
 
         if (cmd->executionStatus == SOULLINK_CMD_STATUS_SUCCESS)
         {
-            gSoulLink.lastExecutedCmdSequenceId = cmd->sequenceId;
+            RecordCommandExecutionSuccess(cmd->sequenceId);
+        }
+        else if (cmd->executionStatus == SOULLINK_CMD_STATUS_DEFERRED)
+        {
+            RecordCommandDeferred(cmd->sequenceId);
         }
 
         gSoulLink.cmdTail++;
@@ -1408,5 +1694,11 @@ void SoulLink_TestSetNextEventSequenceId(u16 seq)
 void SoulLink_TestSetSessionEpoch(u32 epoch)
 {
     gSoulLink.sessionEpoch = epoch;
+}
+
+void SoulLink_TestSetLastExecutedCmdSequenceId(u16 seq)
+{
+    gSoulLink.lastExecutedCmdSequenceId = seq;
+    sDeferredCmdCount = 0;
 }
 #endif

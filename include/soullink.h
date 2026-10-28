@@ -54,6 +54,9 @@ typedef uint8_t bool8;
 #define SOULLINK_FLAG_DIRTY_STATE              (1 << 2) // Unacknowledged state changes present
 #define SOULLINK_FLAG_RECONNECT_NEEDED         (1 << 3) // Reconnection required
 #define SOULLINK_FLAG_RECONCILIATION_REQUIRED  (1 << 4) // Full state reconciliation needed on reconnect
+#if SOULLINK_DEV_TEST
+#define SOULLINK_FLAG_DEV_SAFE_OVERWORLD       (1 << 6) // Automated test: enables safe overworld simulation (dev build only)
+#endif
 
 // Event flags (SoulLinkEvent.flags)
 #define SOULLINK_EVT_FLAG_CRITICAL      (1 << 0) // Cannot be dropped (deaths, forfeits, wipes)
@@ -362,11 +365,14 @@ bool8 SoulLink_IsGymStageUnlocked(u8 stage);
 u8 SoulLink_GetRequiredGymStageForMap(void);
 u8 SoulLink_GetBadgeCount(void);
 void SoulLink_OnBadgeEarned(void);
+bool8 SoulLink_IsMultiplayerActive(void);
+u8 SoulLink_ApplyKillMon(u8 targetMapSec, u16 species);
 
 #if TESTING
 void SoulLink_TestSetNextEventSequenceId(u16 seq);
 void SoulLink_TestSetSessionEpoch(u32 epoch);
 void SoulLink_TestSetSafeOverworldOverride(bool8 enable, bool8 isSafe);
+void SoulLink_TestSetLastExecutedCmdSequenceId(u16 seq);
 #endif
 
 #endif // GUARD_SOULLINK_H
