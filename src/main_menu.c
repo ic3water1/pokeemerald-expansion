@@ -40,6 +40,7 @@
 #include "title_screen.h"
 #include "window.h"
 #include "mystery_gift_menu.h"
+#include "soullink_menu.h"
 
 /*
  * Main menu state machine
@@ -263,6 +264,7 @@ static const u8 gText_BatteryRunDry[] = _("The internal battery has run dry.\nTh
 
 static const u8 gText_MainMenuNewGame[] = _("NEW GAME");
 static const u8 gText_MainMenuContinue[] = _("CONTINUE");
+static const u8 gText_MainMenuSoulLink[] = _("SOUL LINK");
 static const u8 gText_MainMenuOption[] = _("OPTION");
 static const u8 gText_MainMenuMysteryGift[] = _("MYSTERY GIFT");
 static const u8 gText_MainMenuMysteryGift2[] = _("MYSTERY GIFT");
@@ -543,7 +545,8 @@ enum
     ACTION_MYSTERY_GIFT,
     ACTION_MYSTERY_EVENTS,
     ACTION_EREADER,
-    ACTION_INVALID
+    ACTION_INVALID,
+    ACTION_SOULLINK,
 };
 
 #define MAIN_MENU_BORDER_TILE   0x1D5
@@ -694,20 +697,22 @@ static void Task_MainMenuCheckSaveFile(u8 taskId)
             switch (tMenuType)  // if so, highlight the OPTIONS item
             {
             case HAS_NO_SAVED_GAME:
-            case HAS_SAVED_GAME:
-                sCurrItemAndOptionMenuCheck = tMenuType + 1;
+                sCurrItemAndOptionMenuCheck = 2;
                 break;
-            case HAS_MYSTERY_GIFT:
+            case HAS_SAVED_GAME:
                 sCurrItemAndOptionMenuCheck = 3;
                 break;
-            case HAS_MYSTERY_EVENTS:
+            case HAS_MYSTERY_GIFT:
                 sCurrItemAndOptionMenuCheck = 4;
+                break;
+            case HAS_MYSTERY_EVENTS:
+                sCurrItemAndOptionMenuCheck = 5;
                 break;
             }
         }
         sCurrItemAndOptionMenuCheck &= ~OPTION_MENU_FLAG;  // turn off the "returning from options menu" flag
         tCurrItem = sCurrItemAndOptionMenuCheck;
-        tItemCount = tMenuType + 2;
+        tItemCount = tMenuType + 3;
     }
 }
 
@@ -803,32 +808,42 @@ static void Task_DisplayMainMenu(u8 taskId)
         default:
             FillWindowPixelBuffer(0, PIXEL_FILL(0xA));
             FillWindowPixelBuffer(1, PIXEL_FILL(0xA));
+            FillWindowPixelBuffer(3, PIXEL_FILL(0xA));
             AddTextPrinterParameterized3(0, FONT_NORMAL, 0, 1, sTextColor_Headers, TEXT_SKIP_DRAW, gText_MainMenuNewGame);
-            AddTextPrinterParameterized3(1, FONT_NORMAL, 0, 1, sTextColor_Headers, TEXT_SKIP_DRAW, gText_MainMenuOption);
+            AddTextPrinterParameterized3(1, FONT_NORMAL, 0, 1, sTextColor_Headers, TEXT_SKIP_DRAW, gText_MainMenuSoulLink);
+            AddTextPrinterParameterized3(3, FONT_NORMAL, 0, 1, sTextColor_Headers, TEXT_SKIP_DRAW, gText_MainMenuOption);
             PutWindowTilemap(0);
             PutWindowTilemap(1);
+            PutWindowTilemap(3);
             CopyWindowToVram(0, COPYWIN_GFX);
             CopyWindowToVram(1, COPYWIN_GFX);
+            CopyWindowToVram(3, COPYWIN_GFX);
             DrawMainMenuWindowBorder(&sWindowTemplates_MainMenu[0], MAIN_MENU_BORDER_TILE);
             DrawMainMenuWindowBorder(&sWindowTemplates_MainMenu[1], MAIN_MENU_BORDER_TILE);
+            DrawMainMenuWindowBorder(&sWindowTemplates_MainMenu[3], MAIN_MENU_BORDER_TILE);
             break;
         case HAS_SAVED_GAME:
             FillWindowPixelBuffer(2, PIXEL_FILL(0xA));
             FillWindowPixelBuffer(3, PIXEL_FILL(0xA));
             FillWindowPixelBuffer(4, PIXEL_FILL(0xA));
+            FillWindowPixelBuffer(5, PIXEL_FILL(0xA));
             AddTextPrinterParameterized3(2, FONT_NORMAL, 0, 1, sTextColor_Headers, TEXT_SKIP_DRAW, gText_MainMenuContinue);
             AddTextPrinterParameterized3(3, FONT_NORMAL, 0, 1, sTextColor_Headers, TEXT_SKIP_DRAW, gText_MainMenuNewGame);
-            AddTextPrinterParameterized3(4, FONT_NORMAL, 0, 1, sTextColor_Headers, TEXT_SKIP_DRAW, gText_MainMenuOption);
+            AddTextPrinterParameterized3(4, FONT_NORMAL, 0, 1, sTextColor_Headers, TEXT_SKIP_DRAW, gText_MainMenuSoulLink);
+            AddTextPrinterParameterized3(5, FONT_NORMAL, 0, 1, sTextColor_Headers, TEXT_SKIP_DRAW, gText_MainMenuOption);
             MainMenu_FormatSavegameText();
             PutWindowTilemap(2);
             PutWindowTilemap(3);
             PutWindowTilemap(4);
+            PutWindowTilemap(5);
             CopyWindowToVram(2, COPYWIN_GFX);
             CopyWindowToVram(3, COPYWIN_GFX);
             CopyWindowToVram(4, COPYWIN_GFX);
+            CopyWindowToVram(5, COPYWIN_GFX);
             DrawMainMenuWindowBorder(&sWindowTemplates_MainMenu[2], MAIN_MENU_BORDER_TILE);
             DrawMainMenuWindowBorder(&sWindowTemplates_MainMenu[3], MAIN_MENU_BORDER_TILE);
             DrawMainMenuWindowBorder(&sWindowTemplates_MainMenu[4], MAIN_MENU_BORDER_TILE);
+            DrawMainMenuWindowBorder(&sWindowTemplates_MainMenu[5], MAIN_MENU_BORDER_TILE);
             break;
         case HAS_MYSTERY_GIFT:
             FillWindowPixelBuffer(2, PIXEL_FILL(0xA));
@@ -982,6 +997,9 @@ static void Task_HandleMainMenuAPressed(u8 taskId)
                 action = ACTION_NEW_GAME;
                 break;
             case 1:
+                action = ACTION_SOULLINK;
+                break;
+            case 2:
                 action = ACTION_OPTION;
                 break;
             }
@@ -997,6 +1015,9 @@ static void Task_HandleMainMenuAPressed(u8 taskId)
                 action = ACTION_NEW_GAME;
                 break;
             case 2:
+                action = ACTION_SOULLINK;
+                break;
+            case 3:
                 action = ACTION_OPTION;
                 break;
             }
@@ -1097,6 +1118,13 @@ static void Task_HandleMainMenuAPressed(u8 taskId)
             gPlttBufferUnfaded[0] = RGB_BLACK;
             gPlttBufferFaded[0] = RGB_BLACK;
             SetMainCallback2(CB2_ContinueSavedGame);
+            DestroyTask(taskId);
+            break;
+        case ACTION_SOULLINK:
+            gPlttBufferUnfaded[0] = RGB_BLACK;
+            gPlttBufferFaded[0] = RGB_BLACK;
+            gMain.savedCallback = CB2_ReinitMainMenu;
+            SetMainCallback2(CB2_InitSoulLinkMenu);
             DestroyTask(taskId);
             break;
         case ACTION_OPTION:
@@ -1216,6 +1244,9 @@ static void HighlightSelectedMainMenuItem(enum PartyMenuType menuType, u8 select
         case 1:
             SetGpuReg(REG_OFFSET_WIN0V, MENU_WIN_VCOORDS(1));
             break;
+        case 2:
+            SetGpuReg(REG_OFFSET_WIN0V, MENU_WIN_VCOORDS(3));
+            break;
         }
         break;
     case HAS_SAVED_GAME:
@@ -1230,6 +1261,9 @@ static void HighlightSelectedMainMenuItem(enum PartyMenuType menuType, u8 select
             break;
         case 2:
             SetGpuReg(REG_OFFSET_WIN0V, MENU_WIN_VCOORDS(4));
+            break;
+        case 3:
+            SetGpuReg(REG_OFFSET_WIN0V, MENU_WIN_VCOORDS(5));
             break;
         }
         break;

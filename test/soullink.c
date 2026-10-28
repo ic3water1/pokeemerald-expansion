@@ -1767,3 +1767,89 @@ TEST("SoulLink: Out-of-order execution allows older DEFERRED command to execute 
     SoulLink_TestSetSafeOverworldOverride(FALSE, FALSE);
     gPokemonStoragePtr = savedStorage;
 }
+
+TEST("SoulLink UI: In-game lobby request state transitions and mailbox encoding")
+{
+    SoulLink_Init();
+    SoulLink_NewGame();
+    SoulLink_SetTransportState(SOULLINK_TRANSPORT_CONNECTED);
+
+    // 1. Host Room Request (Capacity 2..8)
+    EXPECT_EQ(SoulLink_IsLobbyRequestPending(), FALSE);
+    EXPECT_EQ(SoulLink_LobbyRequestCreate(4), TRUE);
+    EXPECT_EQ(SoulLink_IsLobbyRequestPending(), TRUE);
+    EXPECT_EQ(gSoulLink.lobbyRequest.opCode, SOULLINK_LOBBY_OP_CREATE);
+    EXPECT_EQ(gSoulLink.lobbyRequest.maxPlayers, 4);
+    EXPECT_EQ(gSoulLink.lobbyResponse.responseCode, SOULLINK_RESP_PENDING);
+
+    // In-flight request must prevent duplicate dispatch
+    EXPECT_EQ(SoulLink_LobbyRequestCreate(2), FALSE);
+
+    // Simulate coordinator acknowledging room creation
+    gSoulLink.lobbyResponse.ackRequestId = gSoulLink.lobbyRequest.requestId;
+    gSoulLink.lobbyResponse.opCode = SOULLINK_LOBBY_OP_CREATE;
+    gSoulLink.lobbyResponse.responseCode = SOULLINK_RESP_OK;
+    gSoulLink.lobbyResponse.assignedPlayerId = 0; // Host
+    gSoulLink.lobbyResponse.activePlayerCount = 1;
+    gSoulLink.lobbyResponse.playerReadyMask = 0;
+    gSoulLink.lobbyResponse.roomCode[0] = 'X';
+    gSoulLink.lobbyResponse.roomCode[1] = 'Y';
+    gSoulLink.lobbyResponse.roomCode[2] = 'Z';
+    gSoulLink.lobbyResponse.roomCode[3] = '1';
+    gSoulLink.lobbyResponse.roomCode[4] = '2';
+    gSoulLink.lobbyResponse.roomCode[5] = '3';
+    gSoulLink.lobbyResponse.roomCode[6] = 0;
+    EXPECT_EQ(SoulLink_IsLobbyRequestPending(), FALSE);
+
+    // 2. Ready Toggle
+    EXPECT_EQ(SoulLink_LobbyRequestReady(TRUE), TRUE);
+    EXPECT_EQ(gSoulLink.lobbyRequest.opCode, SOULLINK_LOBBY_OP_READY);
+    EXPECT_EQ(SoulLink_IsLobbyRequestPending(), TRUE);
+
+    // Simulate coordinator room update
+    gSoulLink.lobbyResponse.responseCode = SOULLINK_RESP_OK;
+    gSoulLink.lobbyResponse.playerReadyMask = 1; // Player 0 ready
+    EXPECT_EQ(SoulLink_IsLobbyRequestPending(), FALSE);
+
+    // 3. Start Run
+    EXPECT_EQ(SoulLink_LobbyRequestStartRun(), TRUE);
+    EXPECT_EQ(gSoulLink.lobbyRequest.opCode, SOULLINK_LOBBY_OP_START_RUN);
+    EXPECT_EQ(SoulLink_IsLobbyRequestPending(), TRUE);
+
+    // Simulate run start
+    gSoulLink.lobbyResponse.responseCode = SOULLINK_RESP_OK;
+    gSoulLink.lobbyResponse.runState = SOULLINK_RUN_STATE_IN_PROGRESS;
+    EXPECT_EQ(gSoulLink.lobbyResponse.runState, SOULLINK_RUN_STATE_IN_PROGRESS);
+
+    // 4. Leave Lobby
+    EXPECT_EQ(SoulLink_LobbyRequestLeave(), TRUE);
+    EXPECT_EQ(gSoulLink.lobbyRequest.opCode, SOULLINK_LOBBY_OP_LEAVE);
+
+    // 5. Offline Safety Guarantee
+    SoulLink_SetTransportState(SOULLINK_TRANSPORT_OFFLINE);
+    gSoulLink.lobbyResponse.responseCode = SOULLINK_RESP_IDLE;
+    EXPECT_EQ(SoulLink_LobbyRequestCreate(2), TRUE);
+    // Offline must immediately return ERR_NO_BRIDGE without blocking
+    EXPECT_EQ(gSoulLink.lobbyResponse.responseCode, SOULLINK_RESP_ERR_NO_BRIDGE);
+    EXPECT_EQ(SoulLink_IsLobbyRequestPending(), FALSE);
+
+    // 6. Join Room Request with Bounded Validation
+    SoulLink_SetTransportState(SOULLINK_TRANSPORT_CONNECTED);
+    gSoulLink.lobbyResponse.responseCode = SOULLINK_RESP_IDLE;
+
+    // Invalid codes
+    EXPECT_EQ(SoulLink_LobbyRequestJoin((const u8 *)""), FALSE);
+    EXPECT_EQ(SoulLink_LobbyRequestJoin((const u8 *)"TOOLONGROOMCODE"), FALSE);
+    EXPECT_EQ(SoulLink_LobbyRequestJoin((const u8 *)"INV!@#"), FALSE);
+
+    // Valid 6-character code
+    EXPECT_EQ(SoulLink_LobbyRequestJoin((const u8 *)"ABC123"), TRUE);
+    EXPECT_EQ(gSoulLink.lobbyRequest.opCode, SOULLINK_LOBBY_OP_JOIN);
+    EXPECT_EQ(gSoulLink.lobbyRequest.roomCode[0], 'A');
+    EXPECT_EQ(gSoulLink.lobbyRequest.roomCode[1], 'B');
+    EXPECT_EQ(gSoulLink.lobbyRequest.roomCode[2], 'C');
+    EXPECT_EQ(gSoulLink.lobbyRequest.roomCode[3], '1');
+    EXPECT_EQ(gSoulLink.lobbyRequest.roomCode[4], '2');
+    EXPECT_EQ(gSoulLink.lobbyRequest.roomCode[5], '3');
+    EXPECT_EQ(gSoulLink.lobbyRequest.roomCode[6], 0);
+}
