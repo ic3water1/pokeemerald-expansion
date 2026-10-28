@@ -1,0 +1,15 @@
+# Persistent run identity — draft foundation
+
+Dependency: ROM PR #4 snapshot `ad6804553252a5fdde4f6bb32f397fbab9d00c55`; parent PR #30 snapshot `d5654be4ded070fe7d50d0867552c566fd60393e`. This branch does not incorporate Gemini's later edits. Full architecture, adapter tooling, protocol-2 authority and remaining integration checklist are in the parent repository's `docs/phase-3-save-integrity.md` (issues #10 and #13).
+
+`SoulLinkRunIdentity` is a public 44-byte identity with run ID, participant ID, slot, save version 1 and integrity protocol 2. `SoulLinkRunSave` appends 56 bytes to SaveBlock3 without moving old fields. Size 1552 / 1624 bytes is asserted. Its CRC32 covers SaveBlock3 plus metadata before the checksum. The unique `SL_PROFILE_V1` ROM marker allows the parent launcher to personalize a new ROM copy, paired with a new private 128 KiB flash file. The original solo ROM and save are never converted or copied.
+
+Native normal save/load checks reject foreign profiles, wrong versions and metadata corruption. Identity and checkpoint survive normal flash serialization; successful load always requires reconciliation again. An ordinary solo ROM accepts only empty appended metadata. No new authorization secret lives in the ROM/save. A trusted adapter must authenticate the exact participant using the existing external credential system before confirming the current plan.
+
+**Not a complete multiplayer release:** `SoulLinkRun_CanProgress`, `Lock` and `ConfirmApplied` are integration APIs. Step 4's menu/profile switching, state-load callback, gameplay gate and native command completion handoff are deliberately deferred to avoid rewriting Gemini's current paths. The ROM cannot independently detect every emulator save-state restore. Do not call ConfirmApplied until native enforcement completes. Do not enable protocol 2 for players or merge until the parent integration checklist passes. The old protocol-1 launch path is unchanged.
+
+Legacy solo development saves keep their original data offsets. They cannot be resumed as multiplayer. Old multiplayer development saves with no identity are unsupported for linked resume; create a fresh private profile. Save versions are explicit; no automatic multiplayer migration or save replacement is provided. The two native flash slots remain alternating recovery copies of one save, not separate player modes.
+
+Validation: build normally; `make check TESTS='RunIntegrity'`; parent `npm --prefix bridge run test:profile-rom` patches only a temporary test ELF and uses a new headless mGBA child to test a real profiled save. No existing emulator session is used. Also run existing SoulLink and SaveBlock tests. No Phase 4–8 changes.
+
+Observed validation: production build passes; 4 native unprofiled identity tests and 2 native profiled tests pass. The parent harness independently decodes flash bytes exported after native save/load. Existing SoulLink suite: 42 passes; SaveBlock layout: 3 passes; PokemonStorage layout: 1 pass. No controller-driven multiplayer activation is claimed.
