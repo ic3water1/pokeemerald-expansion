@@ -6,7 +6,7 @@
 // Please note that this simple check is not 100% foolproof, but should be able to catch most unintended shifts.
 #define T_SAVEBLOCK1_SIZE 15568
 #define T_SAVEBLOCK2_SIZE 3884
-#define T_SAVEBLOCK3_SIZE 1496
+#define T_SAVEBLOCK3_SIZE 1552
 #define T_POKEMONSTORAGE_SIZE 34144
 
 TEST("SaveBlock1 is backwards compatible")
@@ -19,7 +19,7 @@ TEST("SaveBlock2 is backwards compatible")
     EXPECT_EQ(sizeof(struct SaveBlock2), T_SAVEBLOCK2_SIZE);
 }
 
-TEST("SaveBlock3 is backwards compatible")
+TEST("SaveBlock3 has the versioned run-identity size")
 {
     EXPECT_EQ(sizeof(struct SaveBlock3), T_SAVEBLOCK3_SIZE);
 }
