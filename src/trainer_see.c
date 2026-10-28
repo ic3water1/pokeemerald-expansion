@@ -13,6 +13,7 @@
 #include "task.h"
 #include "trainer_see.h"
 #include "trainer_hill.h"
+#include "soullink_run.h"
 #include "util.h"
 #include "battle_pyramid.h"
 #include "constants/battle_frontier.h"
@@ -439,7 +440,7 @@ bool8 CheckForTrainersWantingBattle(void)
     u8 trainerObjects[OBJECT_EVENTS_COUNT] = {0};
     u8 trainerObjectsCount = 0;
 
-    if (FlagGet(OW_FLAG_NO_TRAINER_SEE))
+    if (FlagGet(OW_FLAG_NO_TRAINER_SEE) || !SoulLinkRun_CanProgress())
         return FALSE;
 
     gNoOfApproachingTrainers = 0;

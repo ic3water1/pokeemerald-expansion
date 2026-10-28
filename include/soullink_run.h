@@ -18,6 +18,7 @@ void SoulLinkRun_OnNewGame(void);
 bool8 SoulLinkRun_PrepareSave(void);
 bool8 SoulLinkRun_CanProgress(void);
 u8 SoulLinkRun_GetStatus(void);
+void SoulLinkRun_SetStatus(u8 status);
 // Trusted adapter integration must lock on every disconnect/reset/save-state load BEFORE resuming the core.
 void SoulLinkRun_Lock(void);
 bool8 SoulLinkRun_ConfirmApplied(const struct SoulLinkRunIdentity *identity, u32 revision);

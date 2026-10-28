@@ -64,6 +64,51 @@ TEST("RunIntegrity: solo ROM rejects imported multiplayer and blocks writes")
     SoulLinkRun_OnLoad(SAVE_STATUS_EMPTY);
 }
 
+TEST("RunIntegrity: progression gate blocks catching and overworld commands execute CONFIRM_PLAN")
+{
+    SoulLink_Init();
+    ClearSav3();
+
+    struct SoulLinkRunIdentity id = TestIdentity();
+    gSaveBlock3Ptr->runIntegrity.identity = id;
+    gSaveBlock3Ptr->runIntegrity.authoritativeRevision = 2;
+
+    SoulLinkRun_SetStatus(SOULLINK_RUN_RECONCILE);
+    EXPECT_EQ(SoulLinkRun_GetStatus(), SOULLINK_RUN_RECONCILE);
+    EXPECT_EQ(gSoulLink.runStatus, SOULLINK_RUN_RECONCILE);
+    EXPECT(!SoulLinkRun_CanProgress());
+    EXPECT(!SoulLink_CanCatchOnCurrentMap());
+
+    // Queue CONFIRM_PLAN command with revision 3
+    u16 slot = gSoulLink.cmdHead & SOULLINK_QUEUE_MASK;
+    gSoulLink.cmdQueue[slot].sequenceId = 1;
+    gSoulLink.cmdQueue[slot].cmdType = SOULLINK_CMD_CONFIRM_PLAN;
+    gSoulLink.cmdQueue[slot].paramValue = 3;
+    gSoulLink.cmdQueue[slot].executionStatus = SOULLINK_CMD_STATUS_PENDING;
+    gSoulLink.cmdHead++;
+
+    // Force safe overworld conditions
+    SoulLink_TestSetSafeOverworldOverride(TRUE, TRUE);
+    gSoulLink.routeState[16] = ROUTE_STATE_OPEN;
+
+    SoulLink_ProcessOverworldCommands();
+
+    EXPECT_EQ(gSoulLink.cmdQueue[slot].executionStatus, SOULLINK_CMD_STATUS_SUCCESS);
+    EXPECT_EQ(SoulLinkRun_GetStatus(), SOULLINK_RUN_AUTHORIZED);
+    EXPECT_EQ(gSoulLink.runStatus, SOULLINK_RUN_AUTHORIZED);
+    EXPECT(SoulLinkRun_CanProgress());
+    EXPECT_EQ(gSaveBlock3Ptr->runIntegrity.authoritativeRevision, 3);
+
+    // Lock resets status to RECONCILE and blocks catching again
+    SoulLinkRun_Lock();
+    EXPECT_EQ(SoulLinkRun_GetStatus(), SOULLINK_RUN_RECONCILE);
+    EXPECT_EQ(gSoulLink.runStatus, SOULLINK_RUN_RECONCILE);
+    EXPECT(!SoulLinkRun_CanProgress());
+    EXPECT(!SoulLink_CanCatchOnCurrentMap());
+
+    SoulLink_TestSetSafeOverworldOverride(FALSE, FALSE);
+}
+
 static void ExportNativeFlash(void)
 {
     static const char hex[] = "0123456789abcdef";

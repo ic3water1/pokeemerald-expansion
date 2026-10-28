@@ -1,6 +1,7 @@
 #include "global.h"
 #include "save.h"
 #include "load_save.h"
+#include "soullink.h"
 #include "soullink_run.h"
 #include "test_runner.h"
 
@@ -52,6 +53,12 @@ static u32 SaveChecksum(void)
     return SoulLinkRun_Crc32(gSaveBlock3Ptr, offsetof(struct SaveBlock3, runIntegrity.checksum));
 }
 
+void SoulLinkRun_SetStatus(u8 status)
+{
+    sRunStatus = status;
+    gSoulLink.runStatus = status;
+}
+
 void SoulLinkRun_OnLoad(u8 saveStatus)
 {
     struct SoulLinkRunIdentity profile;
@@ -59,26 +66,26 @@ void SoulLinkRun_OnLoad(u8 saveStatus)
     if (IsZero(&profile, sizeof(profile)))
     {
         // Legacy solo data remains in place. A multiplayer save is NEVER accepted by a solo ROM.
-        sRunStatus = IsZero(&gSaveBlock3Ptr->runIntegrity, sizeof(gSaveBlock3Ptr->runIntegrity)) ? SOULLINK_RUN_SOLO : SOULLINK_RUN_FOREIGN;
+        SoulLinkRun_SetStatus(IsZero(&gSaveBlock3Ptr->runIntegrity, sizeof(gSaveBlock3Ptr->runIntegrity)) ? SOULLINK_RUN_SOLO : SOULLINK_RUN_FOREIGN);
         return;
     }
-    sRunStatus = SOULLINK_RUN_CORRUPT;
+    SoulLinkRun_SetStatus(SOULLINK_RUN_CORRUPT);
     if (!SoulLinkRun_Validate(&profile) || gSoulLinkRunProfile.checksum != SoulLinkRun_Crc32(&profile, sizeof(profile)))
         return;
     if (saveStatus == SAVE_STATUS_EMPTY)
     {
-        sRunStatus = SOULLINK_RUN_RECONCILE; // Only an empty profile can become a NEW multiplayer game.
+        SoulLinkRun_SetStatus(SOULLINK_RUN_RECONCILE); // Only an empty profile can become a NEW multiplayer game.
         return;
     }
     if (saveStatus != SAVE_STATUS_OK || gSaveBlock3Ptr->runIntegrity.checksum != SaveChecksum())
         return;
     if (memcmp(&profile, &gSaveBlock3Ptr->runIntegrity.identity, sizeof(profile)) != 0)
     {
-        sRunStatus = SOULLINK_RUN_FOREIGN;
+        SoulLinkRun_SetStatus(SOULLINK_RUN_FOREIGN);
         return;
     }
     // SRAM contains identity and a checkpoint, never an authorization grant.
-    sRunStatus = SOULLINK_RUN_RECONCILE;
+    SoulLinkRun_SetStatus(SOULLINK_RUN_RECONCILE);
 }
 
 void SoulLinkRun_OnNewGame(void)
@@ -89,7 +96,7 @@ void SoulLinkRun_OnNewGame(void)
         return; // Solo format and progress are not converted.
     if (sRunStatus != SOULLINK_RUN_RECONCILE || gSaveFileStatus != SAVE_STATUS_EMPTY)
     {
-        sRunStatus = SOULLINK_RUN_FOREIGN;
+        SoulLinkRun_SetStatus(SOULLINK_RUN_FOREIGN);
         return;
     }
     gSaveBlock3Ptr->runIntegrity.identity = profile;
@@ -117,7 +124,7 @@ u8 SoulLinkRun_GetStatus(void) { return sRunStatus; }
 void SoulLinkRun_Lock(void)
 {
     if (sRunStatus == SOULLINK_RUN_AUTHORIZED)
-        sRunStatus = SOULLINK_RUN_RECONCILE;
+        SoulLinkRun_SetStatus(SOULLINK_RUN_RECONCILE);
 }
 
 bool8 SoulLinkRun_ConfirmApplied(const struct SoulLinkRunIdentity *identity, u32 revision)
@@ -128,6 +135,6 @@ bool8 SoulLinkRun_ConfirmApplied(const struct SoulLinkRunIdentity *identity, u32
         return FALSE;
     // Call only after the bridge authenticates, applies authoritative plan and waits for native enforcement.
     gSaveBlock3Ptr->runIntegrity.authoritativeRevision = revision;
-    sRunStatus = SOULLINK_RUN_AUTHORIZED;
+    SoulLinkRun_SetStatus(SOULLINK_RUN_AUTHORIZED);
     return TRUE;
 }
