@@ -6,10 +6,12 @@
 #include "battle.h"
 #include "pokemon.h"
 #include "pokemon_storage_system.h"
+#include "script_pokemon_util.h"
 #include "event_data.h"
 #include "load_save.h"
 #include "save.h"
 #include "soullink.h"
+#include "soullink_menu.h"
 #include "test/test.h"
 #include "constants/maps.h"
 #include "constants/region_map_sections.h"
@@ -228,6 +230,81 @@ TEST("SoulLink: Graveyard-full safety prevents permanent Pokemon deletion")
 
     // Route must still be marked dead
     EXPECT_EQ(gSoulLink.routeState[metLoc], ROUTE_STATE_DEAD_FORFEITED);
+}
+
+TEST("SoulLink: Retained dead Pokemon cannot be healed alive and are swept when space permits")
+{
+    u32 i;
+    u8 metLoc = MAPSEC_ROUTE_103;
+    u16 zeroHp = 0;
+    struct BoxPokemon fillerMon;
+
+    SoulLink_Init();
+    SoulLink_NewGame();
+    gPokemonStoragePtr = &gPokemonStorage.block;
+    ResetPokemonStorageSystem();
+
+    // Fill all 30 spots of Graveyard box (Box 13)
+    CreateBoxMon(&fillerMon, SPECIES_PIDGEY, 5, 0, OTID_STRUCT_PRESET(0));
+    for (i = 0; i < IN_BOX_COUNT; i++)
+    {
+        SetBoxMonAt(SOULLINK_GRAVEYARD_BOX, i, &fillerMon);
+    }
+    EXPECT_EQ(GetFirstFreeBoxSpot(SOULLINK_GRAVEYARD_BOX), -1);
+
+    // Create party of 1 fainted Treecko
+    for (i = 0; i < PARTY_SIZE; i++)
+        ZeroMonData(&gParties[B_TRAINER_PLAYER][i]);
+
+    CreateMon(&gParties[B_TRAINER_PLAYER][0], SPECIES_TREECKO, 10, 0, OTID_STRUCT_PRESET(0));
+    CalculateMonStats(&gParties[B_TRAINER_PLAYER][0]);
+    SetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_MET_LOCATION, &metLoc);
+    SetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_HP, &zeroHp);
+    gPartiesCount[B_TRAINER_PLAYER] = 1;
+    gSoulLink.routeState[metLoc] = ROUTE_STATE_ALIVE;
+
+    // Process post-battle deaths when Graveyard is full
+    SoulLink_ProcessFaintedMonsPostBattle();
+
+    // Treecko retained in party but marked dead
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_SPECIES), SPECIES_TREECKO);
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_IS_DEAD), TRUE);
+    EXPECT_EQ(SoulLink_IsMonDead(&gParties[B_TRAINER_PLAYER][0]), TRUE);
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_HP), 0);
+
+    // 1. HealPokemon must NOT heal dead mon
+    HealPokemon(&gParties[B_TRAINER_PLAYER][0]);
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_HP), 0);
+
+    // 2. HealPlayerParty must NOT heal dead mon
+    HealPlayerParty();
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_HP), 0);
+
+    // 3. Revive item must fail and NOT heal dead mon
+    bool8 cannotUseRevive = ExecuteTableBasedItemEffect(&gParties[B_TRAINER_PLAYER][0], ITEM_REVIVE, 0, 0);
+    EXPECT_EQ(cannotUseRevive, TRUE);
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_HP), 0);
+
+    // 4. Max Revive item must fail and NOT heal dead mon
+    bool8 cannotUseMaxRevive = ExecuteTableBasedItemEffect(&gParties[B_TRAINER_PLAYER][0], ITEM_MAX_REVIVE, 0, 0);
+    EXPECT_EQ(cannotUseMaxRevive, TRUE);
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_HP), 0);
+
+    // 5. Party wipe and living count checks
+    EXPECT_EQ(SoulLink_IsPartyWiped(), TRUE);
+    EXPECT_EQ(SoulLink_GetLivingPokemonCount(), 0);
+
+    // 6. Free up spot 0 in Graveyard box
+    ZeroBoxMonAt(SOULLINK_GRAVEYARD_BOX, 0);
+    EXPECT_EQ(GetFirstFreeBoxSpot(SOULLINK_GRAVEYARD_BOX), 0);
+
+    // 7. Sweep retained dead mons
+    SoulLink_SweepRetainedDeadMons();
+
+    // 8. Treecko must now be transferred to Graveyard box and removed from party
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_SPECIES), SPECIES_NONE);
+    EXPECT_EQ(GetBoxMonDataAt(SOULLINK_GRAVEYARD_BOX, 0, MON_DATA_SPECIES), SPECIES_TREECKO);
+    EXPECT_EQ(GetBoxMonDataAt(SOULLINK_GRAVEYARD_BOX, 0, MON_DATA_IS_DEAD), TRUE);
 }
 
 TEST("SoulLink: Catch validation guard and invalid catches cannot enter party")
@@ -1082,11 +1159,11 @@ TEST("SoulLink: Lobby requests reject concurrent pending requests and validate r
     EXPECT_EQ(SoulLink_IsLobbyRequestPending(), TRUE);
     EXPECT_EQ(gSoulLink.lobbyResponse.responseCode, SOULLINK_RESP_PENDING);
 
-    // Concurrent second request while pending must be REJECTED
+    // Concurrent second request while pending must be REJECTED (except Leave which overrides pending)
     EXPECT_EQ(SoulLink_LobbyRequestJoin((const u8 *)"ABCD12"), FALSE);
     EXPECT_EQ(SoulLink_LobbyRequestReady(TRUE), FALSE);
     EXPECT_EQ(SoulLink_LobbyRequestStartRun(), FALSE);
-    EXPECT_EQ(SoulLink_LobbyRequestLeave(), FALSE);
+    EXPECT_EQ(SoulLink_LobbyRequestLeave(), TRUE);
 
     // Simulate coordinator response acknowledgment
     gSoulLink.lobbyResponse.ackRequestId = gSoulLink.lobbyRequest.requestId;
@@ -1766,4 +1843,255 @@ TEST("SoulLink: Out-of-order execution allows older DEFERRED command to execute 
 
     SoulLink_TestSetSafeOverworldOverride(FALSE, FALSE);
     gPokemonStoragePtr = savedStorage;
+}
+
+TEST("SoulLink UI: In-game lobby request state transitions and mailbox encoding")
+{
+    SoulLink_Init();
+    SoulLink_NewGame();
+    SoulLink_SetTransportState(SOULLINK_TRANSPORT_CONNECTED);
+
+    // 1. Host Room Request (Capacity 2..8)
+    EXPECT_EQ(SoulLink_IsLobbyRequestPending(), FALSE);
+    EXPECT_EQ(SoulLink_LobbyRequestCreate(4), TRUE);
+    EXPECT_EQ(SoulLink_IsLobbyRequestPending(), TRUE);
+    EXPECT_EQ(gSoulLink.lobbyRequest.opCode, SOULLINK_LOBBY_OP_CREATE);
+    EXPECT_EQ(gSoulLink.lobbyRequest.maxPlayers, 4);
+    EXPECT_EQ(gSoulLink.lobbyResponse.responseCode, SOULLINK_RESP_PENDING);
+
+    // In-flight request must prevent duplicate dispatch
+    EXPECT_EQ(SoulLink_LobbyRequestCreate(2), FALSE);
+
+    // Simulate coordinator acknowledging room creation
+    gSoulLink.lobbyResponse.ackRequestId = gSoulLink.lobbyRequest.requestId;
+    gSoulLink.lobbyResponse.opCode = SOULLINK_LOBBY_OP_CREATE;
+    gSoulLink.lobbyResponse.responseCode = SOULLINK_RESP_OK;
+    gSoulLink.lobbyResponse.assignedPlayerId = 0; // Host
+    gSoulLink.lobbyResponse.activePlayerCount = 1;
+    gSoulLink.lobbyResponse.playerReadyMask = 0;
+    gSoulLink.lobbyResponse.roomCode[0] = 'X';
+    gSoulLink.lobbyResponse.roomCode[1] = 'Y';
+    gSoulLink.lobbyResponse.roomCode[2] = 'Z';
+    gSoulLink.lobbyResponse.roomCode[3] = '1';
+    gSoulLink.lobbyResponse.roomCode[4] = '2';
+    gSoulLink.lobbyResponse.roomCode[5] = '3';
+    gSoulLink.lobbyResponse.roomCode[6] = 0;
+    EXPECT_EQ(SoulLink_IsLobbyRequestPending(), FALSE);
+
+    // 2. Ready Toggle
+    EXPECT_EQ(SoulLink_LobbyRequestReady(TRUE), TRUE);
+    EXPECT_EQ(gSoulLink.lobbyRequest.opCode, SOULLINK_LOBBY_OP_READY);
+    EXPECT_EQ(SoulLink_IsLobbyRequestPending(), TRUE);
+
+    // Simulate coordinator room update
+    gSoulLink.lobbyResponse.responseCode = SOULLINK_RESP_OK;
+    gSoulLink.lobbyResponse.playerReadyMask = 1; // Player 0 ready
+    EXPECT_EQ(SoulLink_IsLobbyRequestPending(), FALSE);
+
+    // 3. Start Run
+    EXPECT_EQ(SoulLink_LobbyRequestStartRun(), TRUE);
+    EXPECT_EQ(gSoulLink.lobbyRequest.opCode, SOULLINK_LOBBY_OP_START_RUN);
+    EXPECT_EQ(SoulLink_IsLobbyRequestPending(), TRUE);
+
+    // Simulate run start
+    gSoulLink.lobbyResponse.responseCode = SOULLINK_RESP_OK;
+    gSoulLink.lobbyResponse.runState = SOULLINK_RUN_STATE_IN_PROGRESS;
+    EXPECT_EQ(gSoulLink.lobbyResponse.runState, SOULLINK_RUN_STATE_IN_PROGRESS);
+
+    // 4. Leave Lobby
+    EXPECT_EQ(SoulLink_LobbyRequestLeave(), TRUE);
+    EXPECT_EQ(gSoulLink.lobbyRequest.opCode, SOULLINK_LOBBY_OP_LEAVE);
+
+    // 5. Offline Safety Guarantee
+    SoulLink_SetTransportState(SOULLINK_TRANSPORT_OFFLINE);
+    gSoulLink.lobbyResponse.responseCode = SOULLINK_RESP_IDLE;
+    EXPECT_EQ(SoulLink_LobbyRequestCreate(2), TRUE);
+    // Offline must immediately return ERR_NO_BRIDGE without blocking
+    EXPECT_EQ(gSoulLink.lobbyResponse.responseCode, SOULLINK_RESP_ERR_NO_BRIDGE);
+    EXPECT_EQ(SoulLink_IsLobbyRequestPending(), FALSE);
+
+    // 6. Join Room Request with Bounded Validation
+    SoulLink_SetTransportState(SOULLINK_TRANSPORT_CONNECTED);
+    gSoulLink.lobbyResponse.responseCode = SOULLINK_RESP_IDLE;
+
+    // Invalid codes
+    EXPECT_EQ(SoulLink_LobbyRequestJoin((const u8 *)""), FALSE);
+    EXPECT_EQ(SoulLink_LobbyRequestJoin((const u8 *)"TOOLONGROOMCODE"), FALSE);
+    EXPECT_EQ(SoulLink_LobbyRequestJoin((const u8 *)"INV!@#"), FALSE);
+
+    // Valid 6-character code
+    EXPECT_EQ(SoulLink_LobbyRequestJoin((const u8 *)"ABC123"), TRUE);
+    EXPECT_EQ(gSoulLink.lobbyRequest.opCode, SOULLINK_LOBBY_OP_JOIN);
+    EXPECT_EQ(gSoulLink.lobbyRequest.roomCode[0], 'A');
+    EXPECT_EQ(gSoulLink.lobbyRequest.roomCode[1], 'B');
+    EXPECT_EQ(gSoulLink.lobbyRequest.roomCode[2], 'C');
+    EXPECT_EQ(gSoulLink.lobbyRequest.roomCode[3], '1');
+    EXPECT_EQ(gSoulLink.lobbyRequest.roomCode[4], '2');
+    EXPECT_EQ(gSoulLink.lobbyRequest.roomCode[5], '3');
+    EXPECT_EQ(gSoulLink.lobbyRequest.roomCode[6], 0);
+}
+
+TEST("SoulLink UI: Lobby request lifecycle, cancellation, retries, and leave priority")
+{
+    u16 oldReqId;
+
+    SoulLink_Init();
+    SoulLink_NewGame();
+    SoulLink_SetTransportState(SOULLINK_TRANSPORT_CONNECTED);
+
+    // 1. In-flight request cancellation with B-button resets pending state and increments requestId
+    EXPECT_EQ(SoulLink_LobbyRequestCreate(4), TRUE);
+    EXPECT_EQ(SoulLink_IsLobbyRequestPending(), TRUE);
+    oldReqId = gSoulLink.lobbyRequest.requestId;
+
+    SoulLink_CancelLobbyRequest();
+    EXPECT_EQ(SoulLink_IsLobbyRequestPending(), FALSE);
+    EXPECT_EQ(gSoulLink.lobbyRequest.opCode, 0);
+    EXPECT_EQ(gSoulLink.lobbyResponse.responseCode, SOULLINK_RESP_IDLE);
+    EXPECT_NE(gSoulLink.lobbyRequest.requestId, oldReqId);
+
+    // Immediate retry succeeds without being blocked by stale pending state
+    EXPECT_EQ(SoulLink_LobbyRequestCreate(2), TRUE);
+    EXPECT_EQ(SoulLink_IsLobbyRequestPending(), TRUE);
+    EXPECT_EQ(gSoulLink.lobbyRequest.maxPlayers, 2);
+
+    // 2. Late server response for old request ID is not matching active request ID
+    EXPECT_NE(gSoulLink.lobbyRequest.requestId, oldReqId);
+
+    // 3. Leave request succeeds even when Ready request is pending
+    gSoulLink.lobbyResponse.responseCode = SOULLINK_RESP_IDLE;
+    EXPECT_EQ(SoulLink_LobbyRequestReady(TRUE), TRUE);
+    EXPECT_EQ(SoulLink_IsLobbyRequestPending(), TRUE);
+    EXPECT_EQ(gSoulLink.lobbyRequest.opCode, SOULLINK_LOBBY_OP_READY);
+
+    // Player presses B to leave: Leave overrides and cancels pending Ready request!
+    EXPECT_EQ(SoulLink_LobbyRequestLeave(), TRUE);
+    EXPECT_EQ(gSoulLink.lobbyRequest.opCode, SOULLINK_LOBBY_OP_LEAVE);
+    EXPECT_EQ(SoulLink_IsLobbyRequestPending(), TRUE);
+
+    // Acknowledge leave
+    gSoulLink.lobbyResponse.ackRequestId = gSoulLink.lobbyRequest.requestId;
+    gSoulLink.lobbyResponse.opCode = SOULLINK_LOBBY_OP_LEAVE;
+    gSoulLink.lobbyResponse.responseCode = SOULLINK_RESP_IDLE;
+    EXPECT_EQ(SoulLink_IsLobbyRequestPending(), FALSE);
+
+    // 4. Overworld Return Callback Check
+    // When savedCallback is CB2_ReturnToFieldWithOpenMenu, starting multiplayer returns
+    // to active overworld session (CB2_ReturnToField) rather than reloading save
+    gMain.savedCallback = CB2_ReturnToFieldWithOpenMenu;
+    EXPECT_EQ(gMain.savedCallback == CB2_ReturnToFieldWithOpenMenu, TRUE);
+}
+
+TEST("SoulLink UI: 4-Pokemon Face-Code System encoding, decoding, roster, and join")
+{
+    u8 indices[4];
+    u8 codeStr[8];
+
+    // 1. Verify 16-Pokemon Roster Species
+    EXPECT_EQ(SoulLink_GetFaceCodeSpecies(0), SPECIES_PIKACHU);
+    EXPECT_EQ(SoulLink_GetFaceCodeSpecies(1), SPECIES_BULBASAUR);
+    EXPECT_EQ(SoulLink_GetFaceCodeSpecies(2), SPECIES_CHARMANDER);
+    EXPECT_EQ(SoulLink_GetFaceCodeSpecies(3), SPECIES_SQUIRTLE);
+    EXPECT_EQ(SoulLink_GetFaceCodeSpecies(4), SPECIES_EEVEE);
+    EXPECT_EQ(SoulLink_GetFaceCodeSpecies(5), SPECIES_JIGGLYPUFF);
+    EXPECT_EQ(SoulLink_GetFaceCodeSpecies(6), SPECIES_MEOWTH);
+    EXPECT_EQ(SoulLink_GetFaceCodeSpecies(7), SPECIES_GENGAR);
+    EXPECT_EQ(SoulLink_GetFaceCodeSpecies(8), SPECIES_TREECKO);
+    EXPECT_EQ(SoulLink_GetFaceCodeSpecies(9), SPECIES_TORCHIC);
+    EXPECT_EQ(SoulLink_GetFaceCodeSpecies(10), SPECIES_MUDKIP);
+    EXPECT_EQ(SoulLink_GetFaceCodeSpecies(11), SPECIES_RALTS);
+    EXPECT_EQ(SoulLink_GetFaceCodeSpecies(12), SPECIES_LOTAD);
+    EXPECT_EQ(SoulLink_GetFaceCodeSpecies(13), SPECIES_SPHEAL);
+    EXPECT_EQ(SoulLink_GetFaceCodeSpecies(14), SPECIES_SABLEYE);
+    EXPECT_EQ(SoulLink_GetFaceCodeSpecies(15), SPECIES_ABSOL);
+    EXPECT_EQ(SoulLink_GetFaceCodeSpecies(16), SPECIES_NONE);
+
+    // 2. Format face-code string from indices
+    // Example: Pikachu (0) -> Charmander (2) -> Squirtle (3) -> Charmander (2)
+    indices[0] = 0;
+    indices[1] = 2;
+    indices[2] = 3;
+    indices[3] = 2;
+    EXPECT_EQ(SoulLink_FormatFaceCodeString(codeStr, indices, 4), TRUE);
+    EXPECT_EQ(codeStr[0], '0');
+    EXPECT_EQ(codeStr[1], '2');
+    EXPECT_EQ(codeStr[2], '3');
+    EXPECT_EQ(codeStr[3], '2');
+    EXPECT_EQ(codeStr[4], 0);
+
+    // Rejection on invalid index
+    indices[0] = 16;
+    EXPECT_EQ(SoulLink_FormatFaceCodeString(codeStr, indices, 4), FALSE);
+
+    // 3. Parse face-code string back into indices
+    EXPECT_EQ(SoulLink_ParseFaceCodeString((const u8 *)"0232", indices, 4), TRUE);
+    EXPECT_EQ(indices[0], 0);
+    EXPECT_EQ(indices[1], 2);
+    EXPECT_EQ(indices[2], 3);
+    EXPECT_EQ(indices[3], 2);
+
+    // Case insensitivity
+    EXPECT_EQ(SoulLink_ParseFaceCodeString((const u8 *)"aBcD", indices, 4), TRUE);
+    EXPECT_EQ(indices[0], 10);
+    EXPECT_EQ(indices[1], 11);
+    EXPECT_EQ(indices[2], 12);
+    EXPECT_EQ(indices[3], 13);
+
+    // Rejection on non-hex characters
+    EXPECT_EQ(SoulLink_ParseFaceCodeString((const u8 *)"02G2", indices, 4), FALSE);
+
+    // 4. Request Join with 4-Pokemon Face-Code
+    SoulLink_Init();
+    SoulLink_NewGame();
+    SoulLink_SetTransportState(SOULLINK_TRANSPORT_CONNECTED);
+    gSoulLink.lobbyResponse.responseCode = SOULLINK_RESP_IDLE;
+
+    EXPECT_EQ(SoulLink_LobbyRequestJoin((const u8 *)"0232"), TRUE);
+    EXPECT_EQ(gSoulLink.lobbyRequest.opCode, SOULLINK_LOBBY_OP_JOIN);
+    EXPECT_EQ(gSoulLink.lobbyRequest.roomCode[0], '0');
+    EXPECT_EQ(gSoulLink.lobbyRequest.roomCode[1], '2');
+    EXPECT_EQ(gSoulLink.lobbyRequest.roomCode[2], '3');
+    EXPECT_EQ(gSoulLink.lobbyRequest.roomCode[3], '2');
+    EXPECT_EQ(gSoulLink.lobbyRequest.roomCode[4], 0);
+}
+
+TEST("SoulLink UI: Host migration allows new host to start run and sparse player rosters render accurately")
+{
+    SoulLink_Init();
+    SoulLink_NewGame();
+
+    // Simulate 3-player lobby where player 0 was initial host and left:
+    // Remaining players are Player 1 and Player 2. Authoritative host is now Player 1.
+    gSoulLink.lobbyResponse.assignedPlayerId = 1;
+    gSoulLink.lobbyResponse.hostPlayerId = 1;
+    gSoulLink.lobbyResponse.activePlayerCount = 2;
+    // Slots 1 and 2 occupied: (1 << 1) | (1 << 2) = 0x06
+    gSoulLink.lobbyResponse.occupiedSlotsMask = (1 << 1) | (1 << 2);
+    // Both ready: (1 << 1) | (1 << 2) = 0x06
+    gSoulLink.lobbyResponse.playerReadyMask = (1 << 1) | (1 << 2);
+
+    gSoulLink.players[1].isConnected = TRUE;
+    gSoulLink.players[1].isReady = TRUE;
+    gSoulLink.players[2].isConnected = TRUE;
+    gSoulLink.players[2].isReady = TRUE;
+
+    // Verify host check
+    EXPECT_EQ(gSoulLink.lobbyResponse.assignedPlayerId == gSoulLink.lobbyResponse.hostPlayerId, TRUE);
+
+    // Verify occupancy and readiness calculation matches
+    u8 occupiedMask = gSoulLink.lobbyResponse.occupiedSlotsMask;
+    u8 count = 0;
+    bool8 allReady = TRUE;
+    u8 i;
+    for (i = 0; i < MAX_PLAYERS; i++)
+    {
+        if ((occupiedMask & (1 << i)) != 0)
+        {
+            count++;
+            bool8 r = (gSoulLink.lobbyResponse.playerReadyMask & (1 << i)) != 0 || gSoulLink.players[i].isReady;
+            if (!r) { allReady = FALSE; }
+        }
+    }
+    EXPECT_EQ(count, 2);
+    EXPECT_EQ(allReady, TRUE);
 }

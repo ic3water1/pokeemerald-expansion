@@ -2493,6 +2493,9 @@ u32 GetBoxMonData3(struct BoxPokemon *boxMon, s32 field, u8 *data)
         case MON_DATA_DAYS_SINCE_FORM_CHANGE:
             retVal = boxMon->daysSinceFormChange;
             break;
+        case MON_DATA_IS_DEAD:
+            retVal = boxMon->isDead;
+            break;
         default:
             break;
         }
@@ -2926,6 +2929,9 @@ void SetBoxMonData(struct BoxPokemon *boxMon, s32 field, const void *dataArg)
         }
         case MON_DATA_DAYS_SINCE_FORM_CHANGE:
             SET8(boxMon->daysSinceFormChange);
+            break;
+        case MON_DATA_IS_DEAD:
+            SET8(boxMon->isDead);
             break;
         }
     }
@@ -3506,7 +3512,7 @@ bool8 PokemonUseItemEffects(struct Pokemon *mon, enum Item item, u8 partyIndex, 
     holdEffect = GetItemHoldEffect(heldItem);
 
     // Skip using the item if it won't do anything
-    if (GetItemEffect(item) == NULL && item != ITEM_ENIGMA_BERRY_E_READER)
+    if (mon->box.isDead || (GetItemEffect(item) == NULL && item != ITEM_ENIGMA_BERRY_E_READER))
         return TRUE;
 
     // Get item effect
@@ -6540,6 +6546,9 @@ void HealPokemon(struct Pokemon *mon)
 {
     u32 data;
 
+    if (mon->box.isDead)
+        return;
+
     data = GetMonData(mon, MON_DATA_MAX_HP);
     SetMonData(mon, MON_DATA_HP, &data);
 
@@ -6552,6 +6561,9 @@ void HealPokemon(struct Pokemon *mon)
 void HealBoxPokemon(struct BoxPokemon *boxMon)
 {
     u32 data;
+
+    if (boxMon->isDead)
+        return;
 
     data = 0;
     SetBoxMonData(boxMon, MON_DATA_HP_LOST, &data);

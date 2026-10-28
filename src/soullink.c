@@ -591,9 +591,10 @@ void SoulLink_ProcessFaintedMonsPostBattle(void)
             gSoulLink.routeState[encounterId] = ROUTE_STATE_DEAD_FORFEITED;
         }
 
-        // Ensure HP is set to 0 to permanently enforce death even if revived
+        // Ensure HP is set to 0 and isDead is set to permanently enforce death
         u16 zeroHp = 0;
         SetMonData(mon, MON_DATA_HP, &zeroHp);
+        mon->box.isDead = TRUE;
 
         // Emit death event if it wasn't already recorded at faint event
         if (!didFaintInBattle)
@@ -691,7 +692,7 @@ bool8 SoulLink_IsPartyWiped(void)
     {
         u16 species = GetMonData(&gParties[B_TRAINER_PLAYER][i], MON_DATA_SPECIES);
         u16 hp = GetMonData(&gParties[B_TRAINER_PLAYER][i], MON_DATA_HP);
-        if (species != SPECIES_NONE && hp > 0)
+        if (species != SPECIES_NONE && hp > 0 && !gParties[B_TRAINER_PLAYER][i].box.isDead)
         {
             return FALSE;
         }
@@ -714,7 +715,7 @@ u8 SoulLink_GetLivingPokemonCount(void)
     {
         u16 species = GetMonData(&gParties[B_TRAINER_PLAYER][i], MON_DATA_SPECIES);
         u16 hp = GetMonData(&gParties[B_TRAINER_PLAYER][i], MON_DATA_HP);
-        if (species != SPECIES_NONE && hp > 0)
+        if (species != SPECIES_NONE && hp > 0 && !gParties[B_TRAINER_PLAYER][i].box.isDead)
         {
             count++;
         }
@@ -742,7 +743,7 @@ u32 SoulLink_GetLivingBoxPokemonCount(void)
             {
                 struct BoxPokemon *boxMon = &gPokemonStoragePtr->boxes[boxId][boxPos];
                 u16 species = GetBoxMonData(boxMon, MON_DATA_SPECIES_OR_EGG);
-                if (species != SPECIES_NONE && species != SPECIES_EGG)
+                if (species != SPECIES_NONE && species != SPECIES_EGG && !boxMon->isDead)
                 {
                     count++;
                 }
@@ -1130,8 +1131,9 @@ u8 SoulLink_ApplyKillMon(u8 targetMapSec, u16 species)
             u16 zeroHp = 0;
             s16 freeSpot = -1;
 
-            // Zero HP immediately so fainted/dead mon cannot be used in battle
+            // Zero HP and mark isDead immediately so fainted/dead mon cannot be used in battle or healed
             SetMonData(mon, MON_DATA_HP, &zeroHp);
+            mon->box.isDead = TRUE;
 
             if (gPokemonStoragePtr != NULL)
             {
@@ -1177,6 +1179,7 @@ u8 SoulLink_ApplyKillMon(u8 targetMapSec, u16 species)
                 if (metLoc == targetMapSec)
                 {
                     struct BoxPokemon *boxMon = GetBoxedMonPtr(boxId, boxPos);
+                    boxMon->isDead = TRUE;
                     s16 freeSpot = GetFirstFreeBoxSpot(SOULLINK_GRAVEYARD_BOX);
                     if (freeSpot != -1)
                     {
@@ -1232,6 +1235,66 @@ u8 SoulLink_ApplyKillMon(u8 targetMapSec, u16 species)
 }
 
 /**
+ * Safely transfers any retained dead Pokémon (held in party or PC boxes due to a previously
+ * full Graveyard box) to Graveyard Box 14 as soon as space becomes available.
+ */
+void SoulLink_SweepRetainedDeadMons(void)
+{
+#if __has_include("global.h")
+    s32 i;
+    bool8 anyPartyMoved = FALSE;
+
+    if (gPokemonStoragePtr == NULL)
+        return;
+
+    // 1. Sweep party for dead mons retained because Graveyard was previously full
+    for (i = (s32)PARTY_SIZE - 1; i >= 0; i--)
+    {
+        struct Pokemon *mon = &gParties[B_TRAINER_PLAYER][i];
+        u16 species = GetMonData(mon, MON_DATA_SPECIES);
+        if (species != SPECIES_NONE && mon->box.isDead)
+        {
+            s16 freeSpot = GetFirstFreeBoxSpot(SOULLINK_GRAVEYARD_BOX);
+            if (freeSpot != -1)
+            {
+                SetBoxMonAt(SOULLINK_GRAVEYARD_BOX, freeSpot, &mon->box);
+                ZeroMonData(mon);
+                anyPartyMoved = TRUE;
+            }
+        }
+    }
+
+    if (anyPartyMoved)
+    {
+        CompactPartySlots();
+    }
+
+    // 2. Sweep other PC boxes for dead mons retained because Graveyard was previously full
+    for (i = 0; i < TOTAL_BOXES_COUNT; i++)
+    {
+        s32 boxPos;
+        if (i == SOULLINK_GRAVEYARD_BOX)
+            continue;
+
+        for (boxPos = 0; boxPos < IN_BOX_COUNT; boxPos++)
+        {
+            struct BoxPokemon *boxMon = GetBoxedMonPtr(i, boxPos);
+            u16 species = GetBoxMonData(boxMon, MON_DATA_SPECIES);
+            if (species != SPECIES_NONE && boxMon->isDead)
+            {
+                s16 freeSpot = GetFirstFreeBoxSpot(SOULLINK_GRAVEYARD_BOX);
+                if (freeSpot != -1)
+                {
+                    SetBoxMonAt(SOULLINK_GRAVEYARD_BOX, freeSpot, boxMon);
+                    ZeroBoxMonAt(i, boxPos);
+                }
+            }
+        }
+    }
+#endif
+}
+
+/**
  * Safe overworld command dispatcher. Called during CB2_Overworld when ScriptContext is idle.
  * Processes incoming synchronized events (linked deaths, route locks, gym unlocks, party wipes).
  * DEFERRED EXECUTION: If not in a genuinely safe overworld state, execution is postponed.
@@ -1242,6 +1305,8 @@ void SoulLink_ProcessOverworldCommands(void)
     {
         return;
     }
+
+    SoulLink_SweepRetainedDeadMons();
 
 #if SOULLINK_DEV_TEST
 #if __has_include("global.h")
@@ -1443,6 +1508,19 @@ bool8 SoulLink_IsLobbyRequestPending(void)
 }
 
 /**
+ * Cancels any active in-flight lobby request, advancing requestId to reject
+ * delayed responses and resetting response state so retries can occur immediately.
+ */
+void SoulLink_CancelLobbyRequest(void)
+{
+    gSoulLink.lobbyRequest.opCode = 0;
+    gSoulLink.lobbyRequest.requestId = AllocateLobbyRequestId();
+    gSoulLink.lobbyResponse.responseCode = SOULLINK_RESP_IDLE;
+    gSoulLink.lobbyResponse.ackRequestId = 0;
+    gSoulLink.lobbyResponse.opCode = 0;
+}
+
+/**
  * Initiates an in-game lobby creation request.
  */
 bool8 SoulLink_LobbyRequestCreate(u8 maxPlayers)
@@ -1584,19 +1662,19 @@ bool8 SoulLink_LobbyRequestStartRun(void)
 
 /**
  * Signals leaving the lobby.
+ * Always succeeds, cancelling any pending in-flight request.
  */
 bool8 SoulLink_LobbyRequestLeave(void)
 {
     u16 reqId;
 
-    if (SoulLink_IsLobbyRequestPending())
-    {
-        return FALSE;
-    }
-
+    gSoulLink.lobbyRequest.opCode = 0;
     reqId = AllocateLobbyRequestId();
     gSoulLink.lobbyRequest.requestId = reqId;
     gSoulLink.lobbyRequest.opCode = SOULLINK_LOBBY_OP_LEAVE;
+    gSoulLink.lobbyRequest.maxPlayers = 0;
+    SafeCopyBoundedString(gSoulLink.lobbyRequest.roomCode, NULL, SOULLINK_ROOM_CODE_LEN);
+    SafeCopyBoundedString(gSoulLink.lobbyRequest.sessionToken, NULL, SOULLINK_SESSION_TOKEN_LEN);
 
     if (gSoulLink.transportState == SOULLINK_TRANSPORT_OFFLINE)
     {

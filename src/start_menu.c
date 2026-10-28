@@ -50,6 +50,7 @@
 #include "constants/battle_frontier.h"
 #include "constants/rgb.h"
 #include "constants/songs.h"
+#include "soullink_menu.h"
 
 // Menu actions
 enum
@@ -69,6 +70,7 @@ enum
     MENU_ACTION_PYRAMID_BAG,
     MENU_ACTION_DEBUG,
     MENU_ACTION_DEXNAV,
+    MENU_ACTION_SOULLINK,
 };
 
 // Save status
@@ -88,7 +90,7 @@ EWRAM_DATA static u8 sSafariBallsWindowId = 0;
 EWRAM_DATA static u8 sBattlePyramidFloorWindowId = 0;
 EWRAM_DATA static u8 sStartMenuCursorPos = 0;
 EWRAM_DATA static u8 sNumStartMenuActions = 0;
-EWRAM_DATA static u8 sCurrentStartMenuActions[9] = {0};
+EWRAM_DATA static u8 sCurrentStartMenuActions[12] = {0};
 EWRAM_DATA static s8 sInitStartMenuData[2] = {0};
 
 EWRAM_DATA static u8 (*sSaveDialogCallback)(void) = NULL;
@@ -111,6 +113,7 @@ static bool8 StartMenuBattlePyramidRetireCallback(void);
 static bool8 StartMenuBattlePyramidBagCallback(void);
 static bool8 StartMenuDebugCallback(void);
 static bool8 StartMenuDexNavCallback(void);
+static bool8 StartMenuSoulLinkCallback(void);
 
 // Menu callbacks
 static bool8 SaveStartCallback(void);
@@ -188,6 +191,7 @@ static const struct WindowTemplate sWindowTemplate_PyramidPeak = {
 };
 
 static const u8 sText_MenuDebug[] = _("DEBUG");
+static const u8 sText_MenuSoulLink[] = _("SOUL LINK");
 
 static const struct MenuAction sStartMenuItems[] =
 {
@@ -206,6 +210,7 @@ static const struct MenuAction sStartMenuItems[] =
     [MENU_ACTION_PYRAMID_BAG]     = {gText_MenuBag,     {.u8_void = StartMenuBattlePyramidBagCallback}},
     [MENU_ACTION_DEBUG]           = {sText_MenuDebug,   {.u8_void = StartMenuDebugCallback}},
     [MENU_ACTION_DEXNAV]          = {gText_MenuDexNav,  {.u8_void = StartMenuDexNavCallback}},
+    [MENU_ACTION_SOULLINK]        = {sText_MenuSoulLink, {.u8_void = StartMenuSoulLinkCallback}},
 };
 
 static const struct BgTemplate sBgTemplates_LinkBattleSave[] =
@@ -340,6 +345,7 @@ static void BuildNormalStartMenu(void)
 
     AddStartMenuAction(MENU_ACTION_PLAYER);
     AddStartMenuAction(MENU_ACTION_SAVE);
+    AddStartMenuAction(MENU_ACTION_SOULLINK);
     AddStartMenuAction(MENU_ACTION_OPTION);
     AddStartMenuAction(MENU_ACTION_EXIT);
 }
@@ -356,6 +362,7 @@ static void BuildDebugStartMenu(void)
         AddStartMenuAction(MENU_ACTION_POKENAV);
     AddStartMenuAction(MENU_ACTION_PLAYER);
     AddStartMenuAction(MENU_ACTION_SAVE);
+    AddStartMenuAction(MENU_ACTION_SOULLINK);
     AddStartMenuAction(MENU_ACTION_OPTION);
 }
 
@@ -762,6 +769,22 @@ static bool8 StartMenuSaveCallback(void)
         RemoveExtraStartMenuWindows();
 
     gMenuCallback = SaveStartCallback; // Display save menu
+
+    return FALSE;
+}
+
+static bool8 StartMenuSoulLinkCallback(void)
+{
+    if (!gPaletteFade.active)
+    {
+        PlayRainStoppingSoundEffect();
+        RemoveExtraStartMenuWindows();
+        CleanupOverworldWindowsAndTilemaps();
+        SetMainCallback2(CB2_InitSoulLinkMenu);
+        gMain.savedCallback = CB2_ReturnToFieldWithOpenMenu;
+
+        return TRUE;
+    }
 
     return FALSE;
 }
