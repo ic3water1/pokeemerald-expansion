@@ -10,6 +10,7 @@
 #include "load_save.h"
 #include "save.h"
 #include "soullink.h"
+#include "soullink_menu.h"
 #include "test/test.h"
 #include "constants/maps.h"
 #include "constants/region_map_sections.h"
@@ -1903,4 +1904,77 @@ TEST("SoulLink UI: Lobby request lifecycle, cancellation, retries, and leave pri
     // to active overworld session (CB2_ReturnToField) rather than reloading save
     gMain.savedCallback = CB2_ReturnToFieldWithOpenMenu;
     EXPECT_EQ(gMain.savedCallback == CB2_ReturnToFieldWithOpenMenu, TRUE);
+}
+
+TEST("SoulLink UI: 4-Pokemon Face-Code System encoding, decoding, roster, and join")
+{
+    u8 indices[4];
+    u8 codeStr[8];
+
+    // 1. Verify 16-Pokemon Roster Species
+    EXPECT_EQ(SoulLink_GetFaceCodeSpecies(0), SPECIES_PIKACHU);
+    EXPECT_EQ(SoulLink_GetFaceCodeSpecies(1), SPECIES_BULBASAUR);
+    EXPECT_EQ(SoulLink_GetFaceCodeSpecies(2), SPECIES_CHARMANDER);
+    EXPECT_EQ(SoulLink_GetFaceCodeSpecies(3), SPECIES_SQUIRTLE);
+    EXPECT_EQ(SoulLink_GetFaceCodeSpecies(4), SPECIES_EEVEE);
+    EXPECT_EQ(SoulLink_GetFaceCodeSpecies(5), SPECIES_JIGGLYPUFF);
+    EXPECT_EQ(SoulLink_GetFaceCodeSpecies(6), SPECIES_MEOWTH);
+    EXPECT_EQ(SoulLink_GetFaceCodeSpecies(7), SPECIES_GENGAR);
+    EXPECT_EQ(SoulLink_GetFaceCodeSpecies(8), SPECIES_TREECKO);
+    EXPECT_EQ(SoulLink_GetFaceCodeSpecies(9), SPECIES_TORCHIC);
+    EXPECT_EQ(SoulLink_GetFaceCodeSpecies(10), SPECIES_MUDKIP);
+    EXPECT_EQ(SoulLink_GetFaceCodeSpecies(11), SPECIES_RALTS);
+    EXPECT_EQ(SoulLink_GetFaceCodeSpecies(12), SPECIES_LOTAD);
+    EXPECT_EQ(SoulLink_GetFaceCodeSpecies(13), SPECIES_SPHEAL);
+    EXPECT_EQ(SoulLink_GetFaceCodeSpecies(14), SPECIES_SABLEYE);
+    EXPECT_EQ(SoulLink_GetFaceCodeSpecies(15), SPECIES_ABSOL);
+    EXPECT_EQ(SoulLink_GetFaceCodeSpecies(16), SPECIES_NONE);
+
+    // 2. Format face-code string from indices
+    // Example: Pikachu (0) -> Charmander (2) -> Squirtle (3) -> Charmander (2)
+    indices[0] = 0;
+    indices[1] = 2;
+    indices[2] = 3;
+    indices[3] = 2;
+    EXPECT_EQ(SoulLink_FormatFaceCodeString(codeStr, indices, 4), TRUE);
+    EXPECT_EQ(codeStr[0], '0');
+    EXPECT_EQ(codeStr[1], '2');
+    EXPECT_EQ(codeStr[2], '3');
+    EXPECT_EQ(codeStr[3], '2');
+    EXPECT_EQ(codeStr[4], 0);
+
+    // Rejection on invalid index
+    indices[0] = 16;
+    EXPECT_EQ(SoulLink_FormatFaceCodeString(codeStr, indices, 4), FALSE);
+
+    // 3. Parse face-code string back into indices
+    EXPECT_EQ(SoulLink_ParseFaceCodeString((const u8 *)"0232", indices, 4), TRUE);
+    EXPECT_EQ(indices[0], 0);
+    EXPECT_EQ(indices[1], 2);
+    EXPECT_EQ(indices[2], 3);
+    EXPECT_EQ(indices[3], 2);
+
+    // Case insensitivity
+    EXPECT_EQ(SoulLink_ParseFaceCodeString((const u8 *)"aBcD", indices, 4), TRUE);
+    EXPECT_EQ(indices[0], 10);
+    EXPECT_EQ(indices[1], 11);
+    EXPECT_EQ(indices[2], 12);
+    EXPECT_EQ(indices[3], 13);
+
+    // Rejection on non-hex characters
+    EXPECT_EQ(SoulLink_ParseFaceCodeString((const u8 *)"02G2", indices, 4), FALSE);
+
+    // 4. Request Join with 4-Pokemon Face-Code
+    SoulLink_Init();
+    SoulLink_NewGame();
+    SoulLink_SetTransportState(SOULLINK_TRANSPORT_CONNECTED);
+    gSoulLink.lobbyResponse.responseCode = SOULLINK_RESP_IDLE;
+
+    EXPECT_EQ(SoulLink_LobbyRequestJoin((const u8 *)"0232"), TRUE);
+    EXPECT_EQ(gSoulLink.lobbyRequest.opCode, SOULLINK_LOBBY_OP_JOIN);
+    EXPECT_EQ(gSoulLink.lobbyRequest.roomCode[0], '0');
+    EXPECT_EQ(gSoulLink.lobbyRequest.roomCode[1], '2');
+    EXPECT_EQ(gSoulLink.lobbyRequest.roomCode[2], '3');
+    EXPECT_EQ(gSoulLink.lobbyRequest.roomCode[3], '2');
+    EXPECT_EQ(gSoulLink.lobbyRequest.roomCode[4], 0);
 }

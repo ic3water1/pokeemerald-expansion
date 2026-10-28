@@ -10,6 +10,7 @@
 #include "new_game.h"
 #include "overworld.h"
 #include "palette.h"
+#include "pokemon_icon.h"
 #include "save.h"
 #include "scanline_effect.h"
 #include "sound.h"
@@ -23,6 +24,7 @@
 #include "constants/rgb.h"
 #include "constants/songs.h"
 #include "constants/characters.h"
+#include "constants/species.h"
 
 // Window IDs
 enum
@@ -122,14 +124,57 @@ static const struct BgTemplate sSoulLinkBgTemplates[] =
     },
 };
 
-static const u8 sCodeCharset[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+// Fixed 16-Pokemon Roster for Face-Code System
+static const u16 sFaceCodeSpecies[16] = {
+    SPECIES_PIKACHU,    // 0
+    SPECIES_BULBASAUR,  // 1
+    SPECIES_CHARMANDER, // 2
+    SPECIES_SQUIRTLE,   // 3
+    SPECIES_EEVEE,      // 4
+    SPECIES_JIGGLYPUFF, // 5
+    SPECIES_MEOWTH,     // 6
+    SPECIES_GENGAR,     // 7
+    SPECIES_TREECKO,    // 8
+    SPECIES_TORCHIC,    // 9
+    SPECIES_MUDKIP,     // 10
+    SPECIES_RALTS,      // 11
+    SPECIES_LOTAD,      // 12
+    SPECIES_SPHEAL,     // 13
+    SPECIES_SABLEYE,    // 14
+    SPECIES_ABSOL,      // 15
+};
+
+static const u8 *const sFaceCodeNames[16] = {
+    COMPOUND_STRING("Pikachu"),
+    COMPOUND_STRING("Bulbasaur"),
+    COMPOUND_STRING("Charmander"),
+    COMPOUND_STRING("Squirtle"),
+    COMPOUND_STRING("Eevee"),
+    COMPOUND_STRING("Jigglypuff"),
+    COMPOUND_STRING("Meowth"),
+    COMPOUND_STRING("Gengar"),
+    COMPOUND_STRING("Treecko"),
+    COMPOUND_STRING("Torchic"),
+    COMPOUND_STRING("Mudkip"),
+    COMPOUND_STRING("Ralts"),
+    COMPOUND_STRING("Lotad"),
+    COMPOUND_STRING("Spheal"),
+    COMPOUND_STRING("Sableye"),
+    COMPOUND_STRING("Absol"),
+};
+
+// 4x4 Grid Coordinates (Centers in screen pixels)
+static const u8 sGridX[4] = {72, 104, 136, 168};
+static const u8 sGridY[4] = {58, 78, 98, 118};
 
 // State variables in EWRAM
 static EWRAM_DATA u8 sScreen = 0;
 static EWRAM_DATA u8 sPrevScreen = 0;
 static EWRAM_DATA u8 sMenuCursor = 0;
 static EWRAM_DATA u8 sHostMaxPlayers = 0;
-static EWRAM_DATA u8 sCodeCursor = 0;
+static EWRAM_DATA u8 sFaceGridCursor = 0;
+static EWRAM_DATA u8 sNumSelectedFaces = 0;
+static EWRAM_DATA u8 sSelectedFaces[4] = {0};
 static EWRAM_DATA u8 sEnteredCode[SOULLINK_ROOM_CODE_LEN] = {0};
 static EWRAM_DATA u16 sWaitingTimer = 0;
 static EWRAM_DATA u8 sWaitingOpCode = 0;
@@ -137,27 +182,80 @@ static EWRAM_DATA u8 sErrorMessage[80] = {0};
 static EWRAM_DATA u8 sLobbyRefreshTimer = 0;
 static EWRAM_DATA u8 sLobbyStartingCountdown = 0;
 
+static EWRAM_DATA u8 sGridSpriteIds[16] = {0};
+static EWRAM_DATA u8 sSlotSpriteIds[4] = {0};
+static EWRAM_DATA u8 sLobbyFaceSpriteIds[4] = {0};
+static EWRAM_DATA bool8 sSpritesInitialized = FALSE;
+
 // Forward declarations
 static void Task_SoulLinkMenu_Main(u8 taskId);
 static void DrawBgWindowFrames(void);
 static void RenderCurrentScreen(void);
 static void SetErrorMessage(const u8 *msg);
+static void DestroyJoinGridSprites(void);
+static void CreateJoinGridSprites(void);
+static void UpdateGridCursorAnimation(void);
+static void DestroyLobbyFaceSprites(void);
+static void CreateLobbyFaceSprites(void);
+static void DestroyAllMenuSprites(void);
 
-// String conversion helpers
-static u8 CharToIndex(u8 c)
+// Exported Face Code Helpers
+u16 SoulLink_GetFaceCodeSpecies(u8 index)
 {
-    if (c >= 'A' && c <= 'Z')
-        return c - 'A';
-    if (c >= '0' && c <= '9')
-        return 26 + (c - '0');
-    return 0;
+    if (index < 16)
+        return sFaceCodeSpecies[index];
+    return SPECIES_NONE;
 }
 
-static u8 IndexToChar(u8 idx)
+const u8 *SoulLink_GetFaceCodeName(u8 index)
 {
-    if (idx < 36)
-        return sCodeCharset[idx];
-    return 'A';
+    if (index < 16)
+        return sFaceCodeNames[index];
+    return COMPOUND_STRING("???");
+}
+
+s8 SoulLink_HexCharToFaceIndex(u8 c)
+{
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'A' && c <= 'F')
+        return c - 'A' + 10;
+    if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
+    return -1;
+}
+
+bool8 SoulLink_FormatFaceCodeString(u8 *dest, const u8 *indices, u8 count)
+{
+    static const u8 sHexDigits[] = "0123456789ABCDEF";
+    u8 i;
+    if (dest == NULL || indices == NULL || count != 4)
+        return FALSE;
+
+    for (i = 0; i < 4; i++)
+    {
+        if (indices[i] >= 16)
+            return FALSE;
+        dest[i] = sHexDigits[indices[i]];
+    }
+    dest[4] = 0;
+    return TRUE;
+}
+
+bool8 SoulLink_ParseFaceCodeString(const u8 *code, u8 *outIndices, u8 count)
+{
+    u8 i;
+    if (code == NULL || outIndices == NULL || count != 4)
+        return FALSE;
+
+    for (i = 0; i < 4; i++)
+    {
+        s8 idx = SoulLink_HexCharToFaceIndex(code[i]);
+        if (idx < 0)
+            return FALSE;
+        outIndices[i] = (u8)idx;
+    }
+    return TRUE;
 }
 
 static void AsciiToPokemonString(u8 *dest, const u8 *asciiSrc, u32 maxChars)
@@ -227,6 +325,164 @@ static void SeedLocalPlayerNameFromSave(void)
     }
 }
 
+// ----------------------------------------------------------------------------
+// Sprite Management
+// ----------------------------------------------------------------------------
+static void InitSpriteIds(void)
+{
+    u8 i;
+    for (i = 0; i < 16; i++)
+        sGridSpriteIds[i] = MAX_SPRITES;
+    for (i = 0; i < 4; i++)
+        sSlotSpriteIds[i] = MAX_SPRITES;
+    for (i = 0; i < 4; i++)
+        sLobbyFaceSpriteIds[i] = MAX_SPRITES;
+    sSpritesInitialized = TRUE;
+}
+
+static void DestroyJoinGridSprites(void)
+{
+    u8 i;
+    if (!sSpritesInitialized)
+        return;
+
+    for (i = 0; i < 16; i++)
+    {
+        if (sGridSpriteIds[i] < MAX_SPRITES)
+        {
+            FreeAndDestroyMonIconSprite(&gSprites[sGridSpriteIds[i]]);
+            sGridSpriteIds[i] = MAX_SPRITES;
+        }
+    }
+    for (i = 0; i < 4; i++)
+    {
+        if (sSlotSpriteIds[i] < MAX_SPRITES)
+        {
+            FreeAndDestroyMonIconSprite(&gSprites[sSlotSpriteIds[i]]);
+            sSlotSpriteIds[i] = MAX_SPRITES;
+        }
+    }
+}
+
+static void UpdateGridCursorAnimation(void)
+{
+    u8 i;
+    for (i = 0; i < 16; i++)
+    {
+        if (sGridSpriteIds[i] < MAX_SPRITES)
+        {
+            struct Sprite *sprite = &gSprites[sGridSpriteIds[i]];
+            if (i == sFaceGridCursor)
+            {
+                sprite->callback = SpriteCB_MonIcon;
+                sprite->animPaused = FALSE;
+            }
+            else
+            {
+                sprite->callback = SpriteCallbackDummy;
+                sprite->animPaused = TRUE;
+                sprite->animCmdIndex = 0;
+                sprite->animDelayCounter = 0;
+                UpdateMonIconFrame(sprite);
+            }
+        }
+    }
+}
+
+static void CreateJoinGridSprites(void)
+{
+    u8 i;
+    if (!sSpritesInitialized)
+        InitSpriteIds();
+
+    DestroyJoinGridSprites();
+
+    for (i = 0; i < 16; i++)
+    {
+        u8 col = i % 4;
+        u8 row = i / 4;
+        u8 spriteId = CreateMonIconNoPersonality(sFaceCodeSpecies[i], SpriteCallbackDummy, sGridX[col], sGridY[row], 1);
+        if (spriteId < MAX_SPRITES)
+        {
+            gSprites[spriteId].animPaused = TRUE;
+            gSprites[spriteId].animBeginning = FALSE;
+            UpdateMonIconFrame(&gSprites[spriteId]);
+            sGridSpriteIds[i] = spriteId;
+        }
+    }
+
+    // Refresh slot sprites for any already selected faces
+    for (i = 0; i < sNumSelectedFaces && i < 4; i++)
+    {
+        u8 speciesIdx = sSelectedFaces[i];
+        if (speciesIdx < 16)
+        {
+            u8 spriteId = CreateMonIconNoPersonality(sFaceCodeSpecies[speciesIdx], SpriteCallbackDummy, sGridX[i], 36, 0);
+            if (spriteId < MAX_SPRITES)
+            {
+                gSprites[spriteId].animPaused = TRUE;
+                gSprites[spriteId].animBeginning = FALSE;
+                UpdateMonIconFrame(&gSprites[spriteId]);
+                sSlotSpriteIds[i] = spriteId;
+            }
+        }
+    }
+
+    UpdateGridCursorAnimation();
+}
+
+static void DestroyLobbyFaceSprites(void)
+{
+    u8 i;
+    if (!sSpritesInitialized)
+        return;
+
+    for (i = 0; i < 4; i++)
+    {
+        if (sLobbyFaceSpriteIds[i] < MAX_SPRITES)
+        {
+            FreeAndDestroyMonIconSprite(&gSprites[sLobbyFaceSpriteIds[i]]);
+            sLobbyFaceSpriteIds[i] = MAX_SPRITES;
+        }
+    }
+}
+
+static void CreateLobbyFaceSprites(void)
+{
+    u8 i;
+    static const u8 sLobbyFaceX[4] = {64, 92, 120, 148};
+
+    if (!sSpritesInitialized)
+        InitSpriteIds();
+
+    DestroyLobbyFaceSprites();
+
+    for (i = 0; i < 4; i++)
+    {
+        s8 faceIdx = SoulLink_HexCharToFaceIndex(gSoulLink.lobbyResponse.roomCode[i]);
+        if (faceIdx < 0 || faceIdx >= 16)
+        {
+            // Fallback for legacy alphanumeric code
+            faceIdx = gSoulLink.lobbyResponse.roomCode[i] % 16;
+        }
+
+        u8 spriteId = CreateMonIconNoPersonality(sFaceCodeSpecies[faceIdx], SpriteCallbackDummy, sLobbyFaceX[i], 16, 0);
+        if (spriteId < MAX_SPRITES)
+        {
+            gSprites[spriteId].animPaused = TRUE;
+            gSprites[spriteId].animBeginning = FALSE;
+            UpdateMonIconFrame(&gSprites[spriteId]);
+            sLobbyFaceSpriteIds[i] = spriteId;
+        }
+    }
+}
+
+static void DestroyAllMenuSprites(void)
+{
+    DestroyJoinGridSprites();
+    DestroyLobbyFaceSprites();
+}
+
 static void MainCB2(void)
 {
     RunTasks();
@@ -266,8 +522,8 @@ void CB2_InitSoulLinkMenu(void)
         DeactivateAllTextPrinters();
         SetGpuReg(REG_OFFSET_WIN0H, 0);
         SetGpuReg(REG_OFFSET_WIN0V, 0);
-        SetGpuReg(REG_OFFSET_WININ, WININ_WIN0_BG0);
-        SetGpuReg(REG_OFFSET_WINOUT, WINOUT_WIN01_BG0 | WINOUT_WIN01_BG1 | WINOUT_WIN01_CLR);
+        SetGpuReg(REG_OFFSET_WININ, WININ_WIN0_BG0 | WININ_WIN0_OBJ);
+        SetGpuReg(REG_OFFSET_WINOUT, WINOUT_WIN01_BG0 | WINOUT_WIN01_BG1 | WINOUT_WIN01_OBJ | WINOUT_WIN01_CLR);
         SetGpuReg(REG_OFFSET_BLDCNT, BLDCNT_TGT1_BG0 | BLDCNT_EFFECT_DARKEN);
         SetGpuReg(REG_OFFSET_BLDALPHA, 0);
         SetGpuReg(REG_OFFSET_BLDY, 4);
@@ -291,6 +547,7 @@ void CB2_InitSoulLinkMenu(void)
         LoadPalette(sSoulLinkBg_Pal, BG_PLTT_ID(0), sizeof(sSoulLinkBg_Pal));
         LoadPalette(GetWindowFrameTilesPal(gSaveBlock2Ptr->optionsWindowFrameType)->pal, BG_PLTT_ID(7), PLTT_SIZE_4BPP);
         LoadPalette(sSoulLinkText_Pal, BG_PLTT_ID(1), sizeof(sSoulLinkText_Pal));
+        LoadMonIconPalettes();
         gMain.state++;
         break;
     case 5:
@@ -305,33 +562,17 @@ void CB2_InitSoulLinkMenu(void)
         sPrevScreen = SOULLINK_SCREEN_MAIN;
         sMenuCursor = 0;
         sHostMaxPlayers = 2;
-        sCodeCursor = 0;
+        sFaceGridCursor = 0;
+        sNumSelectedFaces = 0;
         sWaitingTimer = 0;
         sWaitingOpCode = 0;
         sLobbyRefreshTimer = 0;
         sLobbyStartingCountdown = 0;
+        sEnteredCode[0] = 0;
+
+        InitSpriteIds();
 
         SeedLocalPlayerNameFromSave();
-
-        // Default code: "AAAAAA"
-        sEnteredCode[0] = 'A';
-        sEnteredCode[1] = 'A';
-        sEnteredCode[2] = 'A';
-        sEnteredCode[3] = 'A';
-        sEnteredCode[4] = 'A';
-        sEnteredCode[5] = 'A';
-        sEnteredCode[6] = 0;
-
-        // If a roomCode was already in the mailbox request, initialize code entry with it
-        if (gSoulLink.lobbyRequest.roomCode[0] != 0)
-        {
-            u32 i;
-            for (i = 0; i < 6 && gSoulLink.lobbyRequest.roomCode[i] != 0; i++)
-            {
-                sEnteredCode[i] = gSoulLink.lobbyRequest.roomCode[i];
-            }
-            sEnteredCode[6] = 0;
-        }
 
         RenderCurrentScreen();
         CreateTask(Task_SoulLinkMenu_Main, 0);
@@ -507,54 +748,54 @@ static void RenderHostSetupScreen(void)
 
 static void RenderJoinEntryScreen(void)
 {
-    RenderHeader(COMPOUND_STRING("JOIN ROOM SETUP"));
+    u8 titleBuf[40];
+    StringCopy(titleBuf, COMPOUND_STRING("SELECT: "));
+    StringAppend(titleBuf, sFaceCodeNames[sFaceGridCursor]);
+    RenderHeader(titleBuf);
 
     FillWindowPixelBuffer(WIN_BODY, PIXEL_FILL(1));
-    AddTextPrinterParameterized(WIN_BODY, FONT_NORMAL, COMPOUND_STRING("Enter 6-character room code:"), 8, 6, TEXT_SKIP_DRAW, NULL);
 
-    u8 displayCode[32];
-    u32 i, pos = 0;
-    displayCode[pos++] = CHAR_LEFT_PAREN;
-    displayCode[pos++] = CHAR_SPACE;
+    // Slots header
+    AddTextPrinterParameterized(WIN_BODY, FONT_SMALL, COMPOUND_STRING("CODE:"), 4, 1, TEXT_SKIP_DRAW, NULL);
 
-    for (i = 0; i < 6; i++)
+    u8 s;
+    for (s = 0; s < 4; s++)
     {
-        u8 c = sEnteredCode[i];
-        if (c >= '0' && c <= '9')
-            displayCode[pos++] = CHAR_0 + (c - '0');
-        else if (c >= 'A' && c <= 'Z')
-            displayCode[pos++] = CHAR_A + (c - 'A');
-        else
-            displayCode[pos++] = CHAR_QUESTION_MARK;
-
-        displayCode[pos++] = CHAR_SPACE;
-        displayCode[pos++] = CHAR_SPACE;
+        u8 localX = sGridX[s] - 16;
+        if (s >= sNumSelectedFaces)
+        {
+            u8 slotText[8];
+            slotText[0] = CHAR_LEFT_PAREN;
+            slotText[1] = CHAR_SPACE;
+            slotText[2] = CHAR_0 + (s + 1);
+            slotText[3] = CHAR_SPACE;
+            slotText[4] = CHAR_RIGHT_PAREN;
+            slotText[5] = EOS;
+            AddTextPrinterParameterized(WIN_BODY, FONT_SMALL, slotText, localX - 10, 1, TEXT_SKIP_DRAW, NULL);
+        }
     }
-    displayCode[pos++] = CHAR_RIGHT_PAREN;
-    displayCode[pos++] = EOS;
 
-    AddTextPrinterParameterized(WIN_BODY, FONT_NORMAL, displayCode, 36, 26, TEXT_SKIP_DRAW, NULL);
+    // Grid cursor highlight box behind focused cell
+    u8 c = sFaceGridCursor % 4;
+    u8 r = sFaceGridCursor / 4;
+    u8 cursorLocalX = sGridX[c] - 16;
+    u8 cursorLocalY = sGridY[r] - 32;
 
-    // Draw cursor arrow under active slot
-    u8 cursorStr[32];
-    u32 cpos = 0;
-    cursorStr[cpos++] = CHAR_SPACE;
-    cursorStr[cpos++] = CHAR_SPACE;
-    for (i = 0; i < sCodeCursor; i++)
-    {
-        cursorStr[cpos++] = CHAR_SPACE;
-        cursorStr[cpos++] = CHAR_SPACE;
-        cursorStr[cpos++] = CHAR_SPACE;
-    }
-    cursorStr[cpos++] = CHAR_UP_ARROW;
-    cursorStr[cpos++] = EOS;
-
-    AddTextPrinterParameterized(WIN_BODY, FONT_NORMAL, cursorStr, 36, 38, TEXT_SKIP_DRAW, NULL);
-
-    AddTextPrinterParameterized(WIN_BODY, FONT_SMALL, COMPOUND_STRING("{DPAD_UPDOWN} Change char (A-Z, 0-9)\n{DPAD_LEFTRIGHT} Select slot (1-6)\n{START_BUTTON} or {A_BUTTON} on last slot to join"), 8, 52, TEXT_SKIP_DRAW, NULL);
+    FillWindowPixelRect(WIN_BODY, 2, cursorLocalX - 13, cursorLocalY - 10, 26, 1);
+    FillWindowPixelRect(WIN_BODY, 2, cursorLocalX - 13, cursorLocalY + 9, 26, 1);
+    FillWindowPixelRect(WIN_BODY, 2, cursorLocalX - 13, cursorLocalY - 10, 1, 20);
+    FillWindowPixelRect(WIN_BODY, 2, cursorLocalX + 12, cursorLocalY - 10, 1, 20);
 
     CopyWindowToVram(WIN_BODY, COPYWIN_FULL);
-    RenderFooter(COMPOUND_STRING("{DPAD_UPDOWN} EDIT CODE   {START_BUTTON} JOIN   {B_BUTTON} BACK"));
+
+    if (sNumSelectedFaces < 4)
+    {
+        RenderFooter(COMPOUND_STRING("{A_BUTTON} SELECT   {B_BUTTON} UNDO / BACK"));
+    }
+    else
+    {
+        RenderFooter(COMPOUND_STRING("{START_BUTTON} / {A_BUTTON} JOIN   {B_BUTTON} UNDO"));
+    }
 }
 
 static void RenderWaitingScreen(void)
@@ -588,38 +829,26 @@ static void RenderWaitingScreen(void)
 
 static void RenderLobbyScreen(void)
 {
-    u8 titleBuf[48];
-    u8 codeGba[16];
-    AsciiToPokemonString(codeGba, gSoulLink.lobbyResponse.roomCode, 6);
+    FillWindowPixelBuffer(WIN_HEADER, PIXEL_FILL(1));
+    AddTextPrinterParameterized(WIN_HEADER, FONT_NORMAL, COMPOUND_STRING("ROOM:"), 4, 1, TEXT_SKIP_DRAW, NULL);
 
-    u32 pos = 0;
-    titleBuf[pos++] = CHAR_R;
-    titleBuf[pos++] = CHAR_O;
-    titleBuf[pos++] = CHAR_O;
-    titleBuf[pos++] = CHAR_M;
-    titleBuf[pos++] = CHAR_COLON;
-    titleBuf[pos++] = CHAR_SPACE;
-
-    u32 ci = 0;
-    while (codeGba[ci] != EOS && pos < 20)
+    u8 transport = SoulLink_GetTransportState();
+    if (transport == SOULLINK_TRANSPORT_CONNECTED)
     {
-        titleBuf[pos++] = codeGba[ci++];
+        AddTextPrinterParameterized(WIN_HEADER, FONT_SMALL, COMPOUND_STRING("{COLOR GREEN}{SHADOW LIGHT_GREEN}(ONLINE)"), 160, 2, TEXT_SKIP_DRAW, NULL);
     }
-    titleBuf[pos++] = CHAR_SPACE;
-    titleBuf[pos++] = CHAR_SPACE;
-    titleBuf[pos++] = CHAR_P;
-    titleBuf[pos++] = CHAR_L;
-    titleBuf[pos++] = CHAR_A;
-    titleBuf[pos++] = CHAR_Y;
-    titleBuf[pos++] = CHAR_E;
-    titleBuf[pos++] = CHAR_R;
-    titleBuf[pos++] = CHAR_S;
-    titleBuf[pos++] = CHAR_COLON;
-    titleBuf[pos++] = CHAR_SPACE;
-    titleBuf[pos++] = CHAR_0 + gSoulLink.playerCount;
-    titleBuf[pos++] = EOS;
+    else if (transport == SOULLINK_TRANSPORT_CONNECTING || transport == SOULLINK_TRANSPORT_BRIDGE_DETECTED)
+    {
+        AddTextPrinterParameterized(WIN_HEADER, FONT_SMALL, COMPOUND_STRING("{COLOR BLUE}{SHADOW LIGHT_BLUE}(CONNECTING)"), 144, 2, TEXT_SKIP_DRAW, NULL);
+    }
+    else
+    {
+        AddTextPrinterParameterized(WIN_HEADER, FONT_SMALL, COMPOUND_STRING("{COLOR RED}{SHADOW LIGHT_RED}(OFFLINE)"), 160, 2, TEXT_SKIP_DRAW, NULL);
+    }
 
-    RenderHeader(titleBuf);
+    CopyWindowToVram(WIN_HEADER, COPYWIN_FULL);
+
+    CreateLobbyFaceSprites();
 
     FillWindowPixelBuffer(WIN_BODY, PIXEL_FILL(1));
     AddTextPrinterParameterized(WIN_BODY, FONT_SMALL, COMPOUND_STRING("ROSTER:"), 8, 2, TEXT_SKIP_DRAW, NULL);
@@ -798,12 +1027,16 @@ static void RenderCurrentScreen(void)
 // ----------------------------------------------------------------------------
 static void ExitToSavedCallback(u8 taskId)
 {
+    DestroyAllMenuSprites();
+    FreeMonIconPalettes();
     BeginNormalPaletteFade(PALETTES_ALL, 0, 0, 16, RGB_BLACK);
     sScreen = SOULLINK_SCREEN_EXITING;
 }
 
 static void LaunchRunGame(u8 taskId)
 {
+    DestroyAllMenuSprites();
+    FreeMonIconPalettes();
     BeginNormalPaletteFade(PALETTES_ALL, 0, 0, 16, RGB_BLACK);
     sScreen = SOULLINK_SCREEN_STARTING_RUN;
 }
@@ -860,6 +1093,7 @@ static void Task_SoulLinkMenu_Main(u8 taskId)
         if (gSoulLink.lobbyResponse.runState == SOULLINK_RUN_STATE_IN_PROGRESS)
         {
             PlaySE(SE_EXP);
+            DestroyLobbyFaceSprites();
             LaunchRunGame(taskId);
             return;
         }
@@ -908,6 +1142,10 @@ static void Task_SoulLinkMenu_Main(u8 taskId)
             case SOULLINK_OPTION_JOIN:
                 sPrevScreen = SOULLINK_SCREEN_MAIN;
                 sScreen = SOULLINK_SCREEN_JOIN_ENTRY;
+                sFaceGridCursor = 0;
+                sNumSelectedFaces = 0;
+                sEnteredCode[0] = 0;
+                CreateJoinGridSprites();
                 RenderCurrentScreen();
                 break;
 
@@ -990,82 +1228,139 @@ static void Task_SoulLinkMenu_Main(u8 taskId)
 
     case SOULLINK_SCREEN_JOIN_ENTRY:
     {
+        u8 prevCursor = sFaceGridCursor;
+        u8 r = sFaceGridCursor / 4;
+        u8 c = sFaceGridCursor % 4;
+
         if (JOY_NEW(DPAD_UP))
         {
-            u8 idx = CharToIndex(sEnteredCode[sCodeCursor]);
-            idx = (idx + 1) % 36;
-            sEnteredCode[sCodeCursor] = IndexToChar(idx);
-            PlaySE(SE_SELECT);
-            RenderJoinEntryScreen();
+            r = (r + 3) % 4;
+            sFaceGridCursor = r * 4 + c;
         }
         else if (JOY_NEW(DPAD_DOWN))
         {
-            u8 idx = CharToIndex(sEnteredCode[sCodeCursor]);
-            idx = (idx + 35) % 36;
-            sEnteredCode[sCodeCursor] = IndexToChar(idx);
-            PlaySE(SE_SELECT);
-            RenderJoinEntryScreen();
+            r = (r + 1) % 4;
+            sFaceGridCursor = r * 4 + c;
         }
         else if (JOY_NEW(DPAD_LEFT))
         {
-            if (sCodeCursor > 0)
-            {
-                sCodeCursor--;
-                PlaySE(SE_SELECT);
-                RenderJoinEntryScreen();
-            }
+            c = (c + 3) % 4;
+            sFaceGridCursor = r * 4 + c;
         }
         else if (JOY_NEW(DPAD_RIGHT))
         {
-            if (sCodeCursor < 5)
+            c = (c + 1) % 4;
+            sFaceGridCursor = r * 4 + c;
+        }
+
+        if (sFaceGridCursor != prevCursor)
+        {
+            PlaySE(SE_SELECT);
+            UpdateGridCursorAnimation();
+            RenderJoinEntryScreen();
+            break;
+        }
+
+        if (JOY_NEW(A_BUTTON))
+        {
+            if (sNumSelectedFaces < 4)
             {
-                sCodeCursor++;
                 PlaySE(SE_SELECT);
+                sSelectedFaces[sNumSelectedFaces] = sFaceGridCursor;
+
+                // Spawn slot sprite
+                u8 slot = sNumSelectedFaces;
+                if (sSlotSpriteIds[slot] < MAX_SPRITES)
+                {
+                    FreeAndDestroyMonIconSprite(&gSprites[sSlotSpriteIds[slot]]);
+                    sSlotSpriteIds[slot] = MAX_SPRITES;
+                }
+                u8 spriteId = CreateMonIconNoPersonality(sFaceCodeSpecies[sFaceGridCursor], SpriteCallbackDummy, sGridX[slot], 36, 0);
+                if (spriteId < MAX_SPRITES)
+                {
+                    gSprites[spriteId].animPaused = TRUE;
+                    gSprites[spriteId].animBeginning = FALSE;
+                    UpdateMonIconFrame(&gSprites[spriteId]);
+                    sSlotSpriteIds[slot] = spriteId;
+                }
+
+                sNumSelectedFaces++;
+                SoulLink_FormatFaceCodeString(sEnteredCode, sSelectedFaces, 4);
+                sEnteredCode[sNumSelectedFaces] = 0;
                 RenderJoinEntryScreen();
+            }
+            else
+            {
+                // All 4 selected: A confirms and submits join request
+                PlaySE(SE_SELECT);
+                SoulLink_FormatFaceCodeString(sEnteredCode, sSelectedFaces, 4);
+                DestroyJoinGridSprites();
+                sPrevScreen = SOULLINK_SCREEN_JOIN_ENTRY;
+                sWaitingOpCode = SOULLINK_LOBBY_OP_JOIN;
+                sWaitingTimer = 0;
+
+                if (SoulLink_GetTransportState() == SOULLINK_TRANSPORT_OFFLINE)
+                {
+                    SetErrorMessage((const u8 *)"No emulator bridge detected.\nLoad mgba_soul_emerald.lua.");
+                    sScreen = SOULLINK_SCREEN_ERROR;
+                    RenderCurrentScreen();
+                }
+                else
+                {
+                    SoulLink_LobbyRequestJoin(sEnteredCode);
+                    sScreen = SOULLINK_SCREEN_WAITING;
+                    RenderCurrentScreen();
+                }
+            }
+        }
+        else if (JOY_NEW(START_BUTTON))
+        {
+            if (sNumSelectedFaces == 4)
+            {
+                PlaySE(SE_SELECT);
+                SoulLink_FormatFaceCodeString(sEnteredCode, sSelectedFaces, 4);
+                DestroyJoinGridSprites();
+                sPrevScreen = SOULLINK_SCREEN_JOIN_ENTRY;
+                sWaitingOpCode = SOULLINK_LOBBY_OP_JOIN;
+                sWaitingTimer = 0;
+
+                if (SoulLink_GetTransportState() == SOULLINK_TRANSPORT_OFFLINE)
+                {
+                    SetErrorMessage((const u8 *)"No emulator bridge detected.\nLoad mgba_soul_emerald.lua.");
+                    sScreen = SOULLINK_SCREEN_ERROR;
+                    RenderCurrentScreen();
+                }
+                else
+                {
+                    SoulLink_LobbyRequestJoin(sEnteredCode);
+                    sScreen = SOULLINK_SCREEN_WAITING;
+                    RenderCurrentScreen();
+                }
+            }
+            else
+            {
+                PlaySE(SE_FAILURE);
             }
         }
         else if (JOY_NEW(B_BUTTON))
         {
             PlaySE(SE_SELECT);
-            if (sCodeCursor > 0)
+            if (sNumSelectedFaces > 0)
             {
-                sCodeCursor--;
+                sNumSelectedFaces--;
+                if (sSlotSpriteIds[sNumSelectedFaces] < MAX_SPRITES)
+                {
+                    FreeAndDestroyMonIconSprite(&gSprites[sSlotSpriteIds[sNumSelectedFaces]]);
+                    sSlotSpriteIds[sNumSelectedFaces] = MAX_SPRITES;
+                }
+                sEnteredCode[sNumSelectedFaces] = 0;
                 RenderJoinEntryScreen();
             }
             else
             {
+                DestroyJoinGridSprites();
                 sScreen = SOULLINK_SCREEN_MAIN;
                 RenderCurrentScreen();
-            }
-        }
-        else if (JOY_NEW(START_BUTTON) || (JOY_NEW(A_BUTTON) && sCodeCursor == 5))
-        {
-            PlaySE(SE_SELECT);
-            sEnteredCode[6] = 0;
-            sPrevScreen = SOULLINK_SCREEN_JOIN_ENTRY;
-            sWaitingOpCode = SOULLINK_LOBBY_OP_JOIN;
-            sWaitingTimer = 0;
-
-            if (SoulLink_GetTransportState() == SOULLINK_TRANSPORT_OFFLINE)
-            {
-                SetErrorMessage((const u8 *)"No emulator bridge detected.\nLoad mgba_soul_emerald.lua.");
-                sScreen = SOULLINK_SCREEN_ERROR;
-                RenderCurrentScreen();
-            }
-            else
-            {
-                SoulLink_LobbyRequestJoin(sEnteredCode);
-                sScreen = SOULLINK_SCREEN_WAITING;
-                RenderCurrentScreen();
-            }
-        }
-        else if (JOY_NEW(A_BUTTON))
-        {
-            if (sCodeCursor < 5)
-            {
-                sCodeCursor++;
-                PlaySE(SE_SELECT);
-                RenderJoinEntryScreen();
             }
         }
         break;
@@ -1078,6 +1373,10 @@ static void Task_SoulLinkMenu_Main(u8 taskId)
             PlaySE(SE_SELECT);
             SoulLink_CancelLobbyRequest();
             sScreen = sPrevScreen;
+            if (sScreen == SOULLINK_SCREEN_JOIN_ENTRY)
+            {
+                CreateJoinGridSprites();
+            }
             RenderCurrentScreen();
             return;
         }
@@ -1106,7 +1405,7 @@ static void Task_SoulLinkMenu_Main(u8 taskId)
             }
             else if (respCode == SOULLINK_RESP_ERR_ROOM_NOT_FOUND)
             {
-                SetErrorMessage((const u8 *)"Room not found!\nVerify the 6-character code.");
+                SetErrorMessage((const u8 *)"Room not found!\nVerify the 4-Pokemon code.");
                 SoulLink_CancelLobbyRequest();
                 sScreen = SOULLINK_SCREEN_ERROR;
                 RenderCurrentScreen();
@@ -1195,6 +1494,7 @@ static void Task_SoulLinkMenu_Main(u8 taskId)
         else if (JOY_NEW(B_BUTTON))
         {
             PlaySE(SE_SELECT);
+            DestroyLobbyFaceSprites();
             SoulLink_LobbyRequestLeave();
             sScreen = SOULLINK_SCREEN_MAIN;
             RenderCurrentScreen();
@@ -1209,6 +1509,10 @@ static void Task_SoulLinkMenu_Main(u8 taskId)
             PlaySE(SE_SELECT);
             SoulLink_CancelLobbyRequest();
             sScreen = sPrevScreen;
+            if (sScreen == SOULLINK_SCREEN_JOIN_ENTRY)
+            {
+                CreateJoinGridSprites();
+            }
             RenderCurrentScreen();
         }
         break;
