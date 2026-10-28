@@ -415,6 +415,7 @@ bool32 IsValidForBattle(struct Pokemon *mon)
     return (species != SPECIES_NONE
          && species != SPECIES_EGG
          && GetMonData(mon, MON_DATA_HP) != 0
+         && !mon->box.isDead
          && GetMonData(mon, MON_DATA_IS_EGG) == FALSE);
 }
 
@@ -423,6 +424,7 @@ bool32 IsValidForBattleButDead(struct Pokemon *mon)
     enum Species species = GetMonData(mon, MON_DATA_SPECIES_OR_EGG);
     return (species != SPECIES_NONE
          && species != SPECIES_EGG
+         && !mon->box.isDead
          && GetMonData(mon, MON_DATA_IS_EGG) == FALSE);
 }
 

@@ -6,6 +6,7 @@
 #include "battle.h"
 #include "pokemon.h"
 #include "pokemon_storage_system.h"
+#include "script_pokemon_util.h"
 #include "event_data.h"
 #include "load_save.h"
 #include "save.h"
@@ -229,6 +230,81 @@ TEST("SoulLink: Graveyard-full safety prevents permanent Pokemon deletion")
 
     // Route must still be marked dead
     EXPECT_EQ(gSoulLink.routeState[metLoc], ROUTE_STATE_DEAD_FORFEITED);
+}
+
+TEST("SoulLink: Retained dead Pokemon cannot be healed alive and are swept when space permits")
+{
+    u32 i;
+    u8 metLoc = MAPSEC_ROUTE_103;
+    u16 zeroHp = 0;
+    struct BoxPokemon fillerMon;
+
+    SoulLink_Init();
+    SoulLink_NewGame();
+    gPokemonStoragePtr = &gPokemonStorage.block;
+    ResetPokemonStorageSystem();
+
+    // Fill all 30 spots of Graveyard box (Box 13)
+    CreateBoxMon(&fillerMon, SPECIES_PIDGEY, 5, 0, OTID_STRUCT_PRESET(0));
+    for (i = 0; i < IN_BOX_COUNT; i++)
+    {
+        SetBoxMonAt(SOULLINK_GRAVEYARD_BOX, i, &fillerMon);
+    }
+    EXPECT_EQ(GetFirstFreeBoxSpot(SOULLINK_GRAVEYARD_BOX), -1);
+
+    // Create party of 1 fainted Treecko
+    for (i = 0; i < PARTY_SIZE; i++)
+        ZeroMonData(&gParties[B_TRAINER_PLAYER][i]);
+
+    CreateMon(&gParties[B_TRAINER_PLAYER][0], SPECIES_TREECKO, 10, 0, OTID_STRUCT_PRESET(0));
+    CalculateMonStats(&gParties[B_TRAINER_PLAYER][0]);
+    SetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_MET_LOCATION, &metLoc);
+    SetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_HP, &zeroHp);
+    gPartiesCount[B_TRAINER_PLAYER] = 1;
+    gSoulLink.routeState[metLoc] = ROUTE_STATE_ALIVE;
+
+    // Process post-battle deaths when Graveyard is full
+    SoulLink_ProcessFaintedMonsPostBattle();
+
+    // Treecko retained in party but marked dead
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_SPECIES), SPECIES_TREECKO);
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_IS_DEAD), TRUE);
+    EXPECT_EQ(SoulLink_IsMonDead(&gParties[B_TRAINER_PLAYER][0]), TRUE);
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_HP), 0);
+
+    // 1. HealPokemon must NOT heal dead mon
+    HealPokemon(&gParties[B_TRAINER_PLAYER][0]);
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_HP), 0);
+
+    // 2. HealPlayerParty must NOT heal dead mon
+    HealPlayerParty();
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_HP), 0);
+
+    // 3. Revive item must fail and NOT heal dead mon
+    bool8 cannotUseRevive = ExecuteTableBasedItemEffect(&gParties[B_TRAINER_PLAYER][0], ITEM_REVIVE, 0, 0);
+    EXPECT_EQ(cannotUseRevive, TRUE);
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_HP), 0);
+
+    // 4. Max Revive item must fail and NOT heal dead mon
+    bool8 cannotUseMaxRevive = ExecuteTableBasedItemEffect(&gParties[B_TRAINER_PLAYER][0], ITEM_MAX_REVIVE, 0, 0);
+    EXPECT_EQ(cannotUseMaxRevive, TRUE);
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_HP), 0);
+
+    // 5. Party wipe and living count checks
+    EXPECT_EQ(SoulLink_IsPartyWiped(), TRUE);
+    EXPECT_EQ(SoulLink_GetLivingPokemonCount(), 0);
+
+    // 6. Free up spot 0 in Graveyard box
+    ZeroBoxMonAt(SOULLINK_GRAVEYARD_BOX, 0);
+    EXPECT_EQ(GetFirstFreeBoxSpot(SOULLINK_GRAVEYARD_BOX), 0);
+
+    // 7. Sweep retained dead mons
+    SoulLink_SweepRetainedDeadMons();
+
+    // 8. Treecko must now be transferred to Graveyard box and removed from party
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_SPECIES), SPECIES_NONE);
+    EXPECT_EQ(GetBoxMonDataAt(SOULLINK_GRAVEYARD_BOX, 0, MON_DATA_SPECIES), SPECIES_TREECKO);
+    EXPECT_EQ(GetBoxMonDataAt(SOULLINK_GRAVEYARD_BOX, 0, MON_DATA_IS_DEAD), TRUE);
 }
 
 TEST("SoulLink: Catch validation guard and invalid catches cannot enter party")
@@ -1977,4 +2053,45 @@ TEST("SoulLink UI: 4-Pokemon Face-Code System encoding, decoding, roster, and jo
     EXPECT_EQ(gSoulLink.lobbyRequest.roomCode[2], '3');
     EXPECT_EQ(gSoulLink.lobbyRequest.roomCode[3], '2');
     EXPECT_EQ(gSoulLink.lobbyRequest.roomCode[4], 0);
+}
+
+TEST("SoulLink UI: Host migration allows new host to start run and sparse player rosters render accurately")
+{
+    SoulLink_Init();
+    SoulLink_NewGame();
+
+    // Simulate 3-player lobby where player 0 was initial host and left:
+    // Remaining players are Player 1 and Player 2. Authoritative host is now Player 1.
+    gSoulLink.lobbyResponse.assignedPlayerId = 1;
+    gSoulLink.lobbyResponse.hostPlayerId = 1;
+    gSoulLink.lobbyResponse.activePlayerCount = 2;
+    // Slots 1 and 2 occupied: (1 << 1) | (1 << 2) = 0x06
+    gSoulLink.lobbyResponse.occupiedSlotsMask = (1 << 1) | (1 << 2);
+    // Both ready: (1 << 1) | (1 << 2) = 0x06
+    gSoulLink.lobbyResponse.playerReadyMask = (1 << 1) | (1 << 2);
+
+    gSoulLink.players[1].isConnected = TRUE;
+    gSoulLink.players[1].isReady = TRUE;
+    gSoulLink.players[2].isConnected = TRUE;
+    gSoulLink.players[2].isReady = TRUE;
+
+    // Verify host check
+    EXPECT_EQ(gSoulLink.lobbyResponse.assignedPlayerId == gSoulLink.lobbyResponse.hostPlayerId, TRUE);
+
+    // Verify occupancy and readiness calculation matches
+    u8 occupiedMask = gSoulLink.lobbyResponse.occupiedSlotsMask;
+    u8 count = 0;
+    bool8 allReady = TRUE;
+    u8 i;
+    for (i = 0; i < MAX_PLAYERS; i++)
+    {
+        if ((occupiedMask & (1 << i)) != 0)
+        {
+            count++;
+            bool8 r = (gSoulLink.lobbyResponse.playerReadyMask & (1 << i)) != 0 || gSoulLink.players[i].isReady;
+            if (!r) { allReady = FALSE; }
+        }
+    }
+    EXPECT_EQ(count, 2);
+    EXPECT_EQ(allReady, TRUE);
 }

@@ -222,7 +222,9 @@ struct SoulLinkLobbyResponse {
     u8 activePlayerCount;                   // 1..8
     u8 playerReadyMask;                     // bitmask of ready players
     u8 runState;                            // enum SoulLinkRunState
-    u8 message[12];                         // Status/error text
+    u8 hostPlayerId;                        // Authoritative host player ID
+    u8 occupiedSlotsMask;                   // Bitmask of currently occupied player slots
+    u8 message[10];                         // Status/error text
 };
 
 // Live player info in lobby / run (16 bytes)
@@ -359,6 +361,7 @@ bool8 SoulLink_IsPartyWiped(void);
 u8 SoulLink_GetLivingPokemonCount(void);
 u32 SoulLink_GetLivingBoxPokemonCount(void);
 u32 SoulLink_GetTotalUsablePokemonCount(void);
+void SoulLink_SweepRetainedDeadMons(void);
 
 // Gym progression
 bool8 CheckPartyGymUnlock(void);

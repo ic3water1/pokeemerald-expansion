@@ -450,8 +450,11 @@ static u8 CreateFaceIconSprite(u8 faceIndex, s16 x, s16 y, u8 subpriority)
     u8 spriteId = CreateMonIconNoPersonality(sFaceCodeSpecies[faceIndex], SpriteCallbackDummy, x, y, subpriority);
     if (spriteId < MAX_SPRITES)
     {
+        gSprites[spriteId].oam.priority = 0; // Render in front of BG0 window layer (Finding 1)
         gSprites[spriteId].animPaused = TRUE;
         gSprites[spriteId].animBeginning = FALSE;
+        gSprites[spriteId].animCmdIndex = 0; // Force immediate frame 0 copy (Finding 11)
+        gSprites[spriteId].animDelayCounter = 0;
         gSprites[spriteId].images = (const struct SpriteFrameImage *)sFaceIconTiles[faceIndex];
         UpdateMonIconFrame(&gSprites[spriteId]);
     }
@@ -903,18 +906,38 @@ static void RenderLobbyScreen(void)
     AddTextPrinterParameterized(WIN_BODY, FONT_SMALL, COMPOUND_STRING("ROSTER:"), 8, 2, TEXT_SKIP_DRAW, NULL);
 
     u8 myId = gSoulLink.lobbyResponse.assignedPlayerId;
-    u8 count = gSoulLink.playerCount;
-    if (count < 1) count = 1;
-    if (count > MAX_PLAYERS) count = MAX_PLAYERS;
+    u8 hostId = gSoulLink.lobbyResponse.hostPlayerId;
+    u8 occupiedMask = gSoulLink.lobbyResponse.occupiedSlotsMask;
+    if (occupiedMask == 0)
+    {
+        occupiedMask = (1 << myId);
+        if (hostId < MAX_PLAYERS)
+            occupiedMask |= (1 << hostId);
+    }
 
     u8 i;
-    for (i = 0; i < count; i++)
+    u8 lineIndex = 0;
+    u8 occupiedCount = 0;
+    bool8 allReady = TRUE;
+
+    for (i = 0; i < MAX_PLAYERS; i++)
     {
-        u8 y = 14 + i * 10;
+        if ((occupiedMask & (1 << i)) == 0 && !gSoulLink.players[i].isConnected)
+            continue;
+
+        occupiedCount++;
+        bool8 isReady = (gSoulLink.lobbyResponse.playerReadyMask & (1 << i)) != 0 || gSoulLink.players[i].isReady;
+        if (!isReady)
+            allReady = FALSE;
+
+        u8 y = 14 + lineIndex * 10;
+        lineIndex++;
+        if (lineIndex > 8) break;
+
         u8 line[40];
         u32 lp = 0;
 
-        // Player slot number
+        // Player slot number (stable ID)
         line[lp++] = CHAR_0 + (i + 1);
         line[lp++] = CHAR_PERIOD;
         line[lp++] = CHAR_SPACE;
@@ -947,7 +970,7 @@ static void RenderLobbyScreen(void)
         }
 
         // Host badge
-        if (i == 0)
+        if (i == hostId)
         {
             line[lp++] = CHAR_LEFT_PAREN;
             line[lp++] = CHAR_H;
@@ -972,7 +995,6 @@ static void RenderLobbyScreen(void)
         AddTextPrinterParameterized(WIN_BODY, FONT_SMALL, line, 8, y, TEXT_SKIP_DRAW, NULL);
 
         // Ready status
-        bool8 isReady = (gSoulLink.lobbyResponse.playerReadyMask & (1 << i)) != 0 || gSoulLink.players[i].isReady;
         if (isReady)
         {
             AddTextPrinterParameterized(WIN_BODY, FONT_SMALL, COMPOUND_STRING("{COLOR GREEN}{SHADOW LIGHT_GREEN}(READY)"), 136, y, TEXT_SKIP_DRAW, NULL);
@@ -996,16 +1018,10 @@ static void RenderLobbyScreen(void)
     CopyWindowToVram(WIN_BODY, COPYWIN_FULL);
 
     // Footer prompt
-    bool8 allReady = TRUE;
-    for (i = 0; i < count; i++)
+    bool8 isHost = (myId == hostId);
+    if (isHost)
     {
-        bool8 r = (gSoulLink.lobbyResponse.playerReadyMask & (1 << i)) != 0 || gSoulLink.players[i].isReady;
-        if (!r) { allReady = FALSE; break; }
-    }
-
-    if (myId == 0)
-    {
-        if (count >= 2 && allReady)
+        if (occupiedCount >= 2 && allReady)
         {
             RenderFooter(COMPOUND_STRING("{A_BUTTON} READY   {START_BUTTON} START RUN!   {B_BUTTON} LEAVE"));
         }
@@ -1511,15 +1527,25 @@ static void Task_SoulLinkMenu_Main(u8 taskId)
         }
         else if (JOY_NEW(START_BUTTON))
         {
-            if (myId == 0) // Host only
+            u8 hostId = gSoulLink.lobbyResponse.hostPlayerId;
+            if (myId == hostId) // Authoritative host check (supports host migration!)
             {
-                u8 count = gSoulLink.playerCount;
+                u8 occupiedMask = gSoulLink.lobbyResponse.occupiedSlotsMask;
+                if (occupiedMask == 0)
+                {
+                    occupiedMask = (1 << myId);
+                }
+                u8 count = 0;
                 bool8 allReady = TRUE;
                 u8 i;
-                for (i = 0; i < count; i++)
+                for (i = 0; i < MAX_PLAYERS; i++)
                 {
-                    bool8 r = (gSoulLink.lobbyResponse.playerReadyMask & (1 << i)) != 0 || gSoulLink.players[i].isReady;
-                    if (!r) { allReady = FALSE; break; }
+                    if ((occupiedMask & (1 << i)) != 0 || gSoulLink.players[i].isConnected)
+                    {
+                        count++;
+                        bool8 r = (gSoulLink.lobbyResponse.playerReadyMask & (1 << i)) != 0 || gSoulLink.players[i].isReady;
+                        if (!r) { allReady = FALSE; }
+                    }
                 }
 
                 if (count >= 2 && allReady)
