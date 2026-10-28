@@ -837,7 +837,9 @@ static void Task_SoulLinkMenu_Main(u8 taskId)
         DestroyTask(taskId);
         FreeAllWindowBuffers();
 
-        if (gMain.savedCallback == CB2_ReturnToField)
+        if (gMain.savedCallback == CB2_ReturnToFieldWithOpenMenu ||
+            gMain.savedCallback == CB2_ReturnToField ||
+            gMain.savedCallback == CB2_ReturnToFieldFadeFromBlack)
         {
             SetMainCallback2(CB2_ReturnToField);
         }
@@ -1074,6 +1076,7 @@ static void Task_SoulLinkMenu_Main(u8 taskId)
         if (JOY_NEW(B_BUTTON))
         {
             PlaySE(SE_SELECT);
+            SoulLink_CancelLobbyRequest();
             sScreen = sPrevScreen;
             RenderCurrentScreen();
             return;
@@ -1081,54 +1084,75 @@ static void Task_SoulLinkMenu_Main(u8 taskId)
 
         sWaitingTimer++;
 
-        u8 respCode = gSoulLink.lobbyResponse.responseCode;
-        if (respCode == SOULLINK_RESP_OK)
+        // Only process responses that match our active in-flight request ID and opcode
+        if (gSoulLink.lobbyResponse.ackRequestId == gSoulLink.lobbyRequest.requestId &&
+            gSoulLink.lobbyResponse.opCode == sWaitingOpCode)
         {
-            PlaySE(SE_EXP);
-            sScreen = SOULLINK_SCREEN_LOBBY;
-            RenderCurrentScreen();
+            u8 respCode = gSoulLink.lobbyResponse.responseCode;
+            if (respCode == SOULLINK_RESP_OK)
+            {
+                PlaySE(SE_EXP);
+                sScreen = SOULLINK_SCREEN_LOBBY;
+                RenderCurrentScreen();
+                return;
+            }
+            else if (respCode == SOULLINK_RESP_ERR_NO_BRIDGE)
+            {
+                SetErrorMessage((const u8 *)"No emulator bridge detected.\nPlease load Lua script in mGBA.");
+                SoulLink_CancelLobbyRequest();
+                sScreen = SOULLINK_SCREEN_ERROR;
+                RenderCurrentScreen();
+                return;
+            }
+            else if (respCode == SOULLINK_RESP_ERR_ROOM_NOT_FOUND)
+            {
+                SetErrorMessage((const u8 *)"Room not found!\nVerify the 6-character code.");
+                SoulLink_CancelLobbyRequest();
+                sScreen = SOULLINK_SCREEN_ERROR;
+                RenderCurrentScreen();
+                return;
+            }
+            else if (respCode == SOULLINK_RESP_ERR_ROOM_FULL)
+            {
+                SetErrorMessage((const u8 *)"Room is full!\nMaximum capacity reached.");
+                SoulLink_CancelLobbyRequest();
+                sScreen = SOULLINK_SCREEN_ERROR;
+                RenderCurrentScreen();
+                return;
+            }
+            else if (respCode == SOULLINK_RESP_ERR_ALREADY_STARTED)
+            {
+                SetErrorMessage((const u8 *)"Run has already started!");
+                SoulLink_CancelLobbyRequest();
+                sScreen = SOULLINK_SCREEN_ERROR;
+                RenderCurrentScreen();
+                return;
+            }
+            else if (respCode == SOULLINK_RESP_ERR_NETWORK)
+            {
+                SetErrorMessage((const u8 *)"Network error reaching server.");
+                SoulLink_CancelLobbyRequest();
+                sScreen = SOULLINK_SCREEN_ERROR;
+                RenderCurrentScreen();
+                return;
+            }
+            else if (respCode != SOULLINK_RESP_PENDING && respCode != SOULLINK_RESP_IDLE)
+            {
+                SetErrorMessage((const u8 *)"Coordinator request failed.");
+                SoulLink_CancelLobbyRequest();
+                sScreen = SOULLINK_SCREEN_ERROR;
+                RenderCurrentScreen();
+                return;
+            }
         }
-        else if (respCode == SOULLINK_RESP_ERR_NO_BRIDGE)
-        {
-            SetErrorMessage((const u8 *)"No emulator bridge detected.\nPlease load Lua script in mGBA.");
-            sScreen = SOULLINK_SCREEN_ERROR;
-            RenderCurrentScreen();
-        }
-        else if (respCode == SOULLINK_RESP_ERR_ROOM_NOT_FOUND)
-        {
-            SetErrorMessage((const u8 *)"Room not found!\nVerify the 6-character code.");
-            sScreen = SOULLINK_SCREEN_ERROR;
-            RenderCurrentScreen();
-        }
-        else if (respCode == SOULLINK_RESP_ERR_ROOM_FULL)
-        {
-            SetErrorMessage((const u8 *)"Room is full!\nMaximum capacity reached.");
-            sScreen = SOULLINK_SCREEN_ERROR;
-            RenderCurrentScreen();
-        }
-        else if (respCode == SOULLINK_RESP_ERR_ALREADY_STARTED)
-        {
-            SetErrorMessage((const u8 *)"Run has already started!");
-            sScreen = SOULLINK_SCREEN_ERROR;
-            RenderCurrentScreen();
-        }
-        else if (respCode == SOULLINK_RESP_ERR_NETWORK)
-        {
-            SetErrorMessage((const u8 *)"Network error reaching server.");
-            sScreen = SOULLINK_SCREEN_ERROR;
-            RenderCurrentScreen();
-        }
-        else if (respCode != SOULLINK_RESP_PENDING && respCode != SOULLINK_RESP_IDLE)
-        {
-            SetErrorMessage((const u8 *)"Coordinator request failed.");
-            sScreen = SOULLINK_SCREEN_ERROR;
-            RenderCurrentScreen();
-        }
-        else if (sWaitingTimer > 600) // 10 seconds timeout
+
+        if (sWaitingTimer > 600) // 10 seconds timeout
         {
             SetErrorMessage((const u8 *)"Request timed out.\nCheck network & bridge connection.");
+            SoulLink_CancelLobbyRequest();
             sScreen = SOULLINK_SCREEN_ERROR;
             RenderCurrentScreen();
+            return;
         }
         break;
     }
@@ -1183,6 +1207,7 @@ static void Task_SoulLinkMenu_Main(u8 taskId)
         if (JOY_NEW(A_BUTTON | B_BUTTON))
         {
             PlaySE(SE_SELECT);
+            SoulLink_CancelLobbyRequest();
             sScreen = sPrevScreen;
             RenderCurrentScreen();
         }

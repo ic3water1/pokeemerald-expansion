@@ -362,6 +362,7 @@ static void BuildDebugStartMenu(void)
         AddStartMenuAction(MENU_ACTION_POKENAV);
     AddStartMenuAction(MENU_ACTION_PLAYER);
     AddStartMenuAction(MENU_ACTION_SAVE);
+    AddStartMenuAction(MENU_ACTION_SOULLINK);
     AddStartMenuAction(MENU_ACTION_OPTION);
 }
 

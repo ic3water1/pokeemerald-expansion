@@ -1443,6 +1443,19 @@ bool8 SoulLink_IsLobbyRequestPending(void)
 }
 
 /**
+ * Cancels any active in-flight lobby request, advancing requestId to reject
+ * delayed responses and resetting response state so retries can occur immediately.
+ */
+void SoulLink_CancelLobbyRequest(void)
+{
+    gSoulLink.lobbyRequest.opCode = 0;
+    gSoulLink.lobbyRequest.requestId = AllocateLobbyRequestId();
+    gSoulLink.lobbyResponse.responseCode = SOULLINK_RESP_IDLE;
+    gSoulLink.lobbyResponse.ackRequestId = 0;
+    gSoulLink.lobbyResponse.opCode = 0;
+}
+
+/**
  * Initiates an in-game lobby creation request.
  */
 bool8 SoulLink_LobbyRequestCreate(u8 maxPlayers)
@@ -1584,19 +1597,19 @@ bool8 SoulLink_LobbyRequestStartRun(void)
 
 /**
  * Signals leaving the lobby.
+ * Always succeeds, cancelling any pending in-flight request.
  */
 bool8 SoulLink_LobbyRequestLeave(void)
 {
     u16 reqId;
 
-    if (SoulLink_IsLobbyRequestPending())
-    {
-        return FALSE;
-    }
-
+    gSoulLink.lobbyRequest.opCode = 0;
     reqId = AllocateLobbyRequestId();
     gSoulLink.lobbyRequest.requestId = reqId;
     gSoulLink.lobbyRequest.opCode = SOULLINK_LOBBY_OP_LEAVE;
+    gSoulLink.lobbyRequest.maxPlayers = 0;
+    SafeCopyBoundedString(gSoulLink.lobbyRequest.roomCode, NULL, SOULLINK_ROOM_CODE_LEN);
+    SafeCopyBoundedString(gSoulLink.lobbyRequest.sessionToken, NULL, SOULLINK_SESSION_TOKEN_LEN);
 
     if (gSoulLink.transportState == SOULLINK_TRANSPORT_OFFLINE)
     {

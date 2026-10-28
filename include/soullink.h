@@ -334,6 +334,7 @@ u16 SoulLink_GetPendingCommandCount(void);
 
 // Lobby Request Operations (Phase 3 Step 1)
 bool8 SoulLink_IsLobbyRequestPending(void);
+void SoulLink_CancelLobbyRequest(void);
 bool8 SoulLink_LobbyRequestCreate(u8 maxPlayers);
 bool8 SoulLink_LobbyRequestJoin(const u8 *roomCode);
 bool8 SoulLink_LobbyRequestReady(bool8 ready);

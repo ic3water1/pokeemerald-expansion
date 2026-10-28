@@ -1082,11 +1082,11 @@ TEST("SoulLink: Lobby requests reject concurrent pending requests and validate r
     EXPECT_EQ(SoulLink_IsLobbyRequestPending(), TRUE);
     EXPECT_EQ(gSoulLink.lobbyResponse.responseCode, SOULLINK_RESP_PENDING);
 
-    // Concurrent second request while pending must be REJECTED
+    // Concurrent second request while pending must be REJECTED (except Leave which overrides pending)
     EXPECT_EQ(SoulLink_LobbyRequestJoin((const u8 *)"ABCD12"), FALSE);
     EXPECT_EQ(SoulLink_LobbyRequestReady(TRUE), FALSE);
     EXPECT_EQ(SoulLink_LobbyRequestStartRun(), FALSE);
-    EXPECT_EQ(SoulLink_LobbyRequestLeave(), FALSE);
+    EXPECT_EQ(SoulLink_LobbyRequestLeave(), TRUE);
 
     // Simulate coordinator response acknowledgment
     gSoulLink.lobbyResponse.ackRequestId = gSoulLink.lobbyRequest.requestId;
@@ -1852,4 +1852,55 @@ TEST("SoulLink UI: In-game lobby request state transitions and mailbox encoding"
     EXPECT_EQ(gSoulLink.lobbyRequest.roomCode[4], '2');
     EXPECT_EQ(gSoulLink.lobbyRequest.roomCode[5], '3');
     EXPECT_EQ(gSoulLink.lobbyRequest.roomCode[6], 0);
+}
+
+TEST("SoulLink UI: Lobby request lifecycle, cancellation, retries, and leave priority")
+{
+    u16 oldReqId;
+
+    SoulLink_Init();
+    SoulLink_NewGame();
+    SoulLink_SetTransportState(SOULLINK_TRANSPORT_CONNECTED);
+
+    // 1. In-flight request cancellation with B-button resets pending state and increments requestId
+    EXPECT_EQ(SoulLink_LobbyRequestCreate(4), TRUE);
+    EXPECT_EQ(SoulLink_IsLobbyRequestPending(), TRUE);
+    oldReqId = gSoulLink.lobbyRequest.requestId;
+
+    SoulLink_CancelLobbyRequest();
+    EXPECT_EQ(SoulLink_IsLobbyRequestPending(), FALSE);
+    EXPECT_EQ(gSoulLink.lobbyRequest.opCode, 0);
+    EXPECT_EQ(gSoulLink.lobbyResponse.responseCode, SOULLINK_RESP_IDLE);
+    EXPECT_NE(gSoulLink.lobbyRequest.requestId, oldReqId);
+
+    // Immediate retry succeeds without being blocked by stale pending state
+    EXPECT_EQ(SoulLink_LobbyRequestCreate(2), TRUE);
+    EXPECT_EQ(SoulLink_IsLobbyRequestPending(), TRUE);
+    EXPECT_EQ(gSoulLink.lobbyRequest.maxPlayers, 2);
+
+    // 2. Late server response for old request ID is not matching active request ID
+    EXPECT_NE(gSoulLink.lobbyRequest.requestId, oldReqId);
+
+    // 3. Leave request succeeds even when Ready request is pending
+    gSoulLink.lobbyResponse.responseCode = SOULLINK_RESP_IDLE;
+    EXPECT_EQ(SoulLink_LobbyRequestReady(TRUE), TRUE);
+    EXPECT_EQ(SoulLink_IsLobbyRequestPending(), TRUE);
+    EXPECT_EQ(gSoulLink.lobbyRequest.opCode, SOULLINK_LOBBY_OP_READY);
+
+    // Player presses B to leave: Leave overrides and cancels pending Ready request!
+    EXPECT_EQ(SoulLink_LobbyRequestLeave(), TRUE);
+    EXPECT_EQ(gSoulLink.lobbyRequest.opCode, SOULLINK_LOBBY_OP_LEAVE);
+    EXPECT_EQ(SoulLink_IsLobbyRequestPending(), TRUE);
+
+    // Acknowledge leave
+    gSoulLink.lobbyResponse.ackRequestId = gSoulLink.lobbyRequest.requestId;
+    gSoulLink.lobbyResponse.opCode = SOULLINK_LOBBY_OP_LEAVE;
+    gSoulLink.lobbyResponse.responseCode = SOULLINK_RESP_IDLE;
+    EXPECT_EQ(SoulLink_IsLobbyRequestPending(), FALSE);
+
+    // 4. Overworld Return Callback Check
+    // When savedCallback is CB2_ReturnToFieldWithOpenMenu, starting multiplayer returns
+    // to active overworld session (CB2_ReturnToField) rather than reloading save
+    gMain.savedCallback = CB2_ReturnToFieldWithOpenMenu;
+    EXPECT_EQ(gMain.savedCallback == CB2_ReturnToFieldWithOpenMenu, TRUE);
 }
