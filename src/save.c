@@ -207,7 +207,7 @@ static u8 HandleWriteSector(u16 sectorId, const struct SaveSectorLocation *locat
     for (i = 0; i < size; i++)
         gReadWriteSector->data[i] = data[i];
 
-    if (!SoulLinkRun_PrepareSave())
+    if (!SoulLinkRun_CanProgress())
         return SAVE_STATUS_ERROR;
     CopyFromSaveBlock3(sectorId, gReadWriteSector);
 
@@ -505,6 +505,8 @@ static u8 CopySaveSlotData(u16 sectorId, struct SaveSectorLocation *locations)
         ReadFlashSector(i + slotOffset, gReadWriteSector);
 
         id = gReadWriteSector->id;
+        if (id >= NUM_SECTORS_PER_SLOT)
+            continue;
         if (id == 0)
             gLastWrittenSector = i;
 
@@ -531,6 +533,7 @@ static u8 GetSaveValidStatus(const struct SaveSectorLocation *locations)
     u32 saveSlot2Counter = 0;
     u32 validSectorFlags = 0;
     bool8 signatureValid = FALSE;
+    bool8 counterConsistent = TRUE;
     u8 saveSlot1Status;
     u8 saveSlot2Status;
 
@@ -541,10 +544,15 @@ static u8 GetSaveValidStatus(const struct SaveSectorLocation *locations)
         if (gReadWriteSector->signature == SECTOR_SIGNATURE)
         {
             signatureValid = TRUE;
+            if (gReadWriteSector->id >= NUM_SECTORS_PER_SLOT)
+                continue;
             checksum = CalculateChecksum(gReadWriteSector->data, locations[gReadWriteSector->id].size);
             if (gReadWriteSector->checksum == checksum)
             {
-                saveSlot1Counter = gReadWriteSector->counter;
+                if ((validSectorFlags & (1 << gReadWriteSector->id))
+                 || (validSectorFlags != 0 && saveSlot1Counter != gReadWriteSector->counter))
+                    counterConsistent = FALSE;
+                if (validSectorFlags == 0) saveSlot1Counter = gReadWriteSector->counter;
                 validSectorFlags |= 1 << gReadWriteSector->id;
             }
         }
@@ -552,7 +560,7 @@ static u8 GetSaveValidStatus(const struct SaveSectorLocation *locations)
 
     if (signatureValid)
     {
-        if (validSectorFlags == (1 << NUM_SECTORS_PER_SLOT) - 1)
+        if (counterConsistent && validSectorFlags == (1 << NUM_SECTORS_PER_SLOT) - 1)
             saveSlot1Status = SAVE_STATUS_OK;
         else
             saveSlot1Status = SAVE_STATUS_ERROR;
@@ -565,6 +573,7 @@ static u8 GetSaveValidStatus(const struct SaveSectorLocation *locations)
 
     validSectorFlags = 0;
     signatureValid = FALSE;
+    counterConsistent = TRUE;
 
     // Check save slot 2
     for (i = 0; i < NUM_SECTORS_PER_SLOT; i++)
@@ -573,10 +582,15 @@ static u8 GetSaveValidStatus(const struct SaveSectorLocation *locations)
         if (gReadWriteSector->signature == SECTOR_SIGNATURE)
         {
             signatureValid = TRUE;
+            if (gReadWriteSector->id >= NUM_SECTORS_PER_SLOT)
+                continue;
             checksum = CalculateChecksum(gReadWriteSector->data, locations[gReadWriteSector->id].size);
             if (gReadWriteSector->checksum == checksum)
             {
-                saveSlot2Counter = gReadWriteSector->counter;
+                if ((validSectorFlags & (1 << gReadWriteSector->id))
+                 || (validSectorFlags != 0 && saveSlot2Counter != gReadWriteSector->counter))
+                    counterConsistent = FALSE;
+                if (validSectorFlags == 0) saveSlot2Counter = gReadWriteSector->counter;
                 validSectorFlags |= 1 << gReadWriteSector->id;
             }
         }
@@ -584,7 +598,7 @@ static u8 GetSaveValidStatus(const struct SaveSectorLocation *locations)
 
     if (signatureValid)
     {
-        if (validSectorFlags == (1 << NUM_SECTORS_PER_SLOT) - 1)
+        if (counterConsistent && validSectorFlags == (1 << NUM_SECTORS_PER_SLOT) - 1)
             saveSlot2Status = SAVE_STATUS_OK;
         else
             saveSlot2Status = SAVE_STATUS_ERROR;
@@ -621,7 +635,7 @@ static u8 GetSaveValidStatus(const struct SaveSectorLocation *locations)
     {
         gSaveCounter = saveSlot1Counter;
         if (saveSlot2Status == SAVE_STATUS_ERROR)
-            return SAVE_STATUS_ERROR; // Slot 2 errored
+            return gSoulLinkRunProfile.identity.magic == SOULLINK_RUN_MAGIC ? SAVE_STATUS_OK : SAVE_STATUS_ERROR; // Complete fallback; protected CRC is validated on load.
         return SAVE_STATUS_OK; // Slot 1 is OK, slot 2 is empty
     }
 
@@ -629,7 +643,7 @@ static u8 GetSaveValidStatus(const struct SaveSectorLocation *locations)
     {
         gSaveCounter = saveSlot2Counter;
         if (saveSlot1Status == SAVE_STATUS_ERROR)
-            return SAVE_STATUS_ERROR; // Slot 1 errored
+            return gSoulLinkRunProfile.identity.magic == SOULLINK_RUN_MAGIC ? SAVE_STATUS_OK : SAVE_STATUS_ERROR; // Complete fallback; protected CRC is validated on load.
         return SAVE_STATUS_OK; // Slot 2 is OK, slot 1 is empty
     }
 
@@ -721,7 +735,7 @@ u8 HandleSavingData(u8 saveType)
     u8 i;
     u32 *backupVar = gTrainerHillVBlankCounter;
 
-    if (!SoulLinkRun_PrepareSave())
+    if (!SoulLinkRun_CanProgress())
         return SAVE_STATUS_ERROR;
     gTrainerHillVBlankCounter = NULL;
     UpdateSaveAddresses();
@@ -739,6 +753,8 @@ u8 HandleSavingData(u8 saveType)
 
         // Write the full save slot first
         CopyPartyAndObjectsToSave();
+    if (!SoulLinkRun_PrepareSave())
+        return TRUE;
         WriteSaveSectorOrSlot(FULL_SAVE_SLOT, gRamSaveSectorLocations);
 
         // Save the Hall of Fame
@@ -752,6 +768,8 @@ u8 HandleSavingData(u8 saveType)
     case SAVE_NORMAL:
     default:
         CopyPartyAndObjectsToSave();
+    if (!SoulLinkRun_PrepareSave())
+        return TRUE;
         WriteSaveSectorOrSlot(FULL_SAVE_SLOT, gRamSaveSectorLocations);
         break;
     case SAVE_LINK:
@@ -759,6 +777,13 @@ u8 HandleSavingData(u8 saveType)
         // Used by link / Battle Frontier
         // Write only SaveBlocks 1 and 2 (skips the PC)
         CopyPartyAndObjectsToSave();
+    if (!SoulLinkRun_PrepareSave())
+        return TRUE;
+        if (SoulLinkRun_GetStatus() != SOULLINK_RUN_SOLO)
+        {
+            WriteSaveSectorOrSlot(FULL_SAVE_SLOT, gRamSaveSectorLocations);
+            break;
+        }
         for (i = SECTOR_ID_SAVEBLOCK2; i <= SECTOR_ID_SAVEBLOCK1_END; i++)
             HandleReplaceSector(i, gRamSaveSectorLocations);
         for (i = SECTOR_ID_SAVEBLOCK2; i <= SECTOR_ID_SAVEBLOCK1_END; i++)
@@ -771,6 +796,8 @@ u8 HandleSavingData(u8 saveType)
 
         // Overwrite save slot
         CopyPartyAndObjectsToSave();
+    if (!SoulLinkRun_PrepareSave())
+        return TRUE;
         WriteSaveSectorOrSlot(FULL_SAVE_SLOT, gRamSaveSectorLocations);
         break;
     }
@@ -780,7 +807,7 @@ u8 HandleSavingData(u8 saveType)
 
 u8 TrySavingData(u8 saveType)
 {
-    if (!SoulLinkRun_PrepareSave())
+    if (!SoulLinkRun_CanProgress())
     {
         gSaveAttemptStatus = SAVE_STATUS_ERROR;
         return SAVE_STATUS_ERROR;
@@ -807,16 +834,19 @@ u8 TrySavingData(u8 saveType)
 
 bool8 LinkFullSave_Init(void)
 {
-    if (gFlashMemoryPresent != TRUE || !SoulLinkRun_PrepareSave())
+    if (gFlashMemoryPresent != TRUE || !SoulLinkRun_CanProgress())
         return TRUE;
     UpdateSaveAddresses();
     CopyPartyAndObjectsToSave();
+    if (!SoulLinkRun_PrepareSave())
+        return TRUE;
     RestoreSaveBackupVarsAndIncrement(gRamSaveSectorLocations);
     return FALSE;
 }
 
 bool8 LinkFullSave_WriteSector(void)
 {
+    if (!SoulLinkRun_CanProgress()) return TRUE;
     u8 status = HandleWriteIncrementalSector(NUM_SECTORS_PER_SLOT, gRamSaveSectorLocations);
     if (gDamagedSaveSectors)
         DoSaveFailedScreen(SAVE_NORMAL);
@@ -832,6 +862,7 @@ bool8 LinkFullSave_WriteSector(void)
 
 bool8 LinkFullSave_ReplaceLastSector(void)
 {
+    if (!SoulLinkRun_CanProgress()) return TRUE;
     HandleReplaceSectorAndVerify(NUM_SECTORS_PER_SLOT, gRamSaveSectorLocations);
     if (gDamagedSaveSectors)
         DoSaveFailedScreen(SAVE_NORMAL);
@@ -840,6 +871,7 @@ bool8 LinkFullSave_ReplaceLastSector(void)
 
 bool8 LinkFullSave_SetLastSectorSignature(void)
 {
+    if (!SoulLinkRun_CanProgress()) return TRUE;
     CopySectorSignatureByte(NUM_SECTORS_PER_SLOT, gRamSaveSectorLocations);
     if (gDamagedSaveSectors)
         DoSaveFailedScreen(SAVE_NORMAL);
@@ -848,11 +880,17 @@ bool8 LinkFullSave_SetLastSectorSignature(void)
 
 bool8 WriteSaveBlock2(void)
 {
+    // A protected SaveBlock3 checksum spans all fourteen chunks. Replacing only
+    // the first five chunks would leave a checksum from another snapshot.
+    if (SoulLinkRun_GetStatus() != SOULLINK_RUN_SOLO)
+        return LinkFullSave_Init();
     if (gFlashMemoryPresent != TRUE)
         return TRUE;
 
     UpdateSaveAddresses();
     CopyPartyAndObjectsToSave();
+    if (!SoulLinkRun_PrepareSave())
+        return TRUE;
     RestoreSaveBackupVars(gRamSaveSectorLocations);
 
     // Because RestoreSaveBackupVars is called immediately prior, gIncrementalSectorId will always be 0 below,
@@ -866,6 +904,14 @@ bool8 WriteSaveBlock2(void)
 // It returns TRUE when finished.
 bool8 WriteSaveBlock1Sector(void)
 {
+    if (SoulLinkRun_GetStatus() != SOULLINK_RUN_SOLO)
+    {
+        if (!SoulLinkRun_CanProgress()) return TRUE;
+        if (!LinkFullSave_WriteSector()) return FALSE;
+        LinkFullSave_ReplaceLastSector();
+        LinkFullSave_SetLastSectorSignature();
+        return TRUE;
+    }
     bool32 finished = FALSE;
     u16 sectorId = ++gIncrementalSectorId; // Because WriteSaveBlock2 will have been called prior, this will be SECTOR_ID_SAVEBLOCK1_START
     if (sectorId <= SECTOR_ID_SAVEBLOCK1_END)
@@ -982,7 +1028,7 @@ u32 TryWriteSpecialSaveSector(u8 sector, u8 *src)
     u8 *savData;
     void *savDataBuffer;
 
-    if (!SoulLinkRun_PrepareSave())
+    if (!SoulLinkRun_CanProgress())
         return SAVE_STATUS_ERROR;
 
     if (sector != SECTOR_ID_TRAINER_HILL && sector != SECTOR_ID_RECORDED_BATTLE)

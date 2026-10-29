@@ -4,6 +4,7 @@
 #include "soullink_run.h"
 #include "soullink.h"
 #include "gba/flash_internal.h"
+#include "agb_flash.h"
 #include "test/test.h"
 
 static struct SoulLinkRunIdentity TestIdentity(void)
@@ -64,12 +65,14 @@ TEST("RunIntegrity: solo ROM rejects imported multiplayer and blocks writes")
     SoulLinkRun_OnLoad(SAVE_STATUS_EMPTY);
 }
 
-TEST("RunIntegrity: progression gate blocks catching and overworld commands execute CONFIRM_PLAN")
+TEST("RunProfile: native validation stays locked until coordinator authorization")
 {
     SoulLink_Init();
     ClearSav3();
 
-    struct SoulLinkRunIdentity id = TestIdentity();
+    struct SoulLinkRunIdentity id;
+    memcpy(&id, (const void *)&gSoulLinkRunProfile.identity, sizeof(id));
+    ASSUME(SoulLinkRun_Validate(&id));
     gSaveBlock3Ptr->runIntegrity.identity = id;
     gSaveBlock3Ptr->runIntegrity.authoritativeRevision = 2;
 
@@ -79,11 +82,14 @@ TEST("RunIntegrity: progression gate blocks catching and overworld commands exec
     EXPECT(!SoulLinkRun_CanProgress());
     EXPECT(!SoulLink_CanCatchOnCurrentMap());
 
+    gSoulLink.lobbyRequest.requestId = 1;
+    gSoulLink.transportState = SOULLINK_TRANSPORT_CONNECTED;
     // Queue CONFIRM_PLAN command with revision 3
     u16 slot = gSoulLink.cmdHead & SOULLINK_QUEUE_MASK;
     gSoulLink.cmdQueue[slot].sequenceId = 1;
     gSoulLink.cmdQueue[slot].cmdType = SOULLINK_CMD_CONFIRM_PLAN;
     gSoulLink.cmdQueue[slot].paramValue = 3;
+    gSoulLink.cmdQueue[slot].paramPrimaryType = 1;
     gSoulLink.cmdQueue[slot].executionStatus = SOULLINK_CMD_STATUS_PENDING;
     gSoulLink.cmdHead++;
 
@@ -94,6 +100,11 @@ TEST("RunIntegrity: progression gate blocks catching and overworld commands exec
     SoulLink_ProcessOverworldCommands();
 
     EXPECT_EQ(gSoulLink.cmdQueue[slot].executionStatus, SOULLINK_CMD_STATUS_SUCCESS);
+    EXPECT_EQ(SoulLinkRun_GetStatus(), SOULLINK_RUN_RECONCILE);
+    EXPECT(!SoulLinkRun_CanProgress());
+    struct SoulLinkCommand authorize = { .sequenceId = 2, .cmdType = SOULLINK_CMD_AUTHORIZE_PLAN, .paramValue = 3, .paramPrimaryType = 1 };
+    EXPECT(SoulLink_ReceiveCommand(&authorize));
+    SoulLink_ProcessOverworldCommands();
     EXPECT_EQ(SoulLinkRun_GetStatus(), SOULLINK_RUN_AUTHORIZED);
     EXPECT_EQ(gSoulLink.runStatus, SOULLINK_RUN_AUTHORIZED);
     EXPECT(SoulLinkRun_CanProgress());
@@ -187,4 +198,140 @@ TEST("RunProfile: imported solo, wrong-run and corrupt flash metadata fail close
     EXPECT_EQ(SoulLinkRun_GetStatus(), SOULLINK_RUN_CORRUPT);
     EXPECT(!SoulLinkRun_CanProgress());
     EXPECT_EQ(TrySavingData(SAVE_NORMAL), SAVE_STATUS_ERROR);
+}
+
+TEST("RunProfile: adapter mirror can revoke but cannot manufacture authorization")
+{
+    struct SoulLinkRunIdentity id;
+    memcpy(&id, (const void *)&gSoulLinkRunProfile.identity, sizeof(id));
+    ASSUME(SoulLinkRun_Validate(&id));
+    SoulLink_Init(); ClearSav3();
+    gSaveBlock3Ptr->runIntegrity.identity = id;
+    SoulLinkRun_SetStatus(SOULLINK_RUN_SOLO);
+    EXPECT(!SoulLinkRun_CanProgress());
+    EXPECT_EQ(SoulLinkRun_GetStatus(), SOULLINK_RUN_RECONCILE);
+    gSoulLink.runStatus = SOULLINK_RUN_AUTHORIZED;
+    EXPECT(!SoulLinkRun_CanProgress());
+    EXPECT(SoulLinkRun_ConfirmApplied(&id, 0));
+    gSoulLink.runStatus = SOULLINK_RUN_RECONCILE;
+    EXPECT(!SoulLinkRun_CanProgress());
+    EXPECT_EQ(SoulLinkRun_GetStatus(), SOULLINK_RUN_RECONCILE);
+}
+
+extern u32 gSoulLinkTestSaveCrcCount;
+TEST("RunProfile: full link and incremental transactions calculate one finalized CRC")
+{
+    struct SoulLinkRunIdentity id;
+    u32 before, i;
+    memcpy(&id, (const void *)&gSoulLinkRunProfile.identity, sizeof(id));
+    ASSUME(SoulLinkRun_Validate(&id));
+    SoulLink_Init(); ClearSav3(); gSaveFileStatus = SAVE_STATUS_EMPTY;
+    SoulLinkRun_OnLoad(SAVE_STATUS_EMPTY); SoulLinkRun_OnNewGame();
+    EXPECT(SoulLinkRun_ConfirmApplied(&id, 0));
+    before = gSoulLinkTestSaveCrcCount;
+    BenchmarkStart(); REG_TM3CNT = (TIMER_ENABLE | TIMER_1024CLK) << 16;
+    EXPECT_EQ(TrySavingData(SAVE_NORMAL), SAVE_STATUS_OK);
+    struct Benchmark timing = BenchmarkStop();
+    Test_MgbaPrintf("REPAIRPERF:protected-normal-save:%d:1024", timing.ticks);
+    BenchmarkStart(); REG_TM3CNT = (TIMER_ENABLE | TIMER_1024CLK) << 16;
+    u32 checksum = SoulLinkRun_Crc32(gSaveBlock3Ptr, 1548);
+    timing = BenchmarkStop();
+    EXPECT_NE(checksum,0);
+    Test_MgbaPrintf("REPAIRPERF:protected-crc:%d:1024", timing.ticks);
+    EXPECT_EQ(gSoulLinkTestSaveCrcCount - before, 1);
+    gSoulLink.routeState[16] = ROUTE_STATE_DEAD_FORFEITED;
+    before = gSoulLinkTestSaveCrcCount;
+    EXPECT_EQ(TrySavingData(SAVE_LINK), SAVE_STATUS_OK);
+    EXPECT_EQ(gSoulLinkTestSaveCrcCount - before, 1);
+    EXPECT_EQ(LoadGameSave(SAVE_NORMAL), SAVE_STATUS_OK);
+    EXPECT_EQ(gSaveBlock3Ptr->soulLink.routeState[16], ROUTE_STATE_DEAD_FORFEITED);
+    EXPECT(SoulLinkRun_ConfirmApplied(&id, 0));
+    before = gSoulLinkTestSaveCrcCount;
+    EXPECT(!LinkFullSave_Init());
+    for(i=0;i<20;i++) if(LinkFullSave_WriteSector()) break;
+    EXPECT_LT(i,20);
+    EXPECT_EQ(gSoulLinkTestSaveCrcCount - before, 1);
+    LinkFullSave_ReplaceLastSector();
+    LinkFullSave_SetLastSectorSignature();
+    EXPECT_EQ(LoadGameSave(SAVE_NORMAL), SAVE_STATUS_OK);
+    EXPECT(SoulLinkRun_ConfirmApplied(&id, 0));
+    before = gSoulLinkTestSaveCrcCount;
+    EXPECT(!WriteSaveBlock2());
+    for(i=0;i<20;i++) if(WriteSaveBlock1Sector()) break;
+    EXPECT_LT(i,20);
+    EXPECT_EQ(gSoulLinkTestSaveCrcCount - before, 1);
+    EXPECT_EQ(LoadGameSave(SAVE_NORMAL), SAVE_STATUS_OK);
+}
+
+TEST("RunProfile: a foreign emulator state cannot authorize or overwrite this profile")
+{
+    struct SoulLinkRunIdentity id;
+    memcpy(&id, (const void *)&gSoulLinkRunProfile.identity, sizeof(id));
+    ASSUME(SoulLinkRun_Validate(&id));
+    SoulLink_Init(); ClearSav3();
+    gSaveBlock3Ptr->runIntegrity.identity = id;
+    gSaveBlock3Ptr->runIntegrity.identity.participantId[0] ^= 1;
+    SoulLinkRun_SetStatus(SOULLINK_RUN_AUTHORIZED);
+    EXPECT(!SoulLinkRun_CanProgress());
+    EXPECT_EQ(SoulLinkRun_GetStatus(), SOULLINK_RUN_FOREIGN);
+    EXPECT_EQ(TrySavingData(SAVE_NORMAL), SAVE_STATUS_ERROR);
+    SoulLinkRun_SetStatus(SOULLINK_RUN_RECONCILE);
+    EXPECT(!SoulLinkRun_ConfirmApplied(&gSaveBlock3Ptr->runIntegrity.identity, 0));
+}
+TEST("RunProfile: interrupted incremental transaction recovers the prior complete flash slot")
+{
+    struct SoulLinkRunIdentity id;
+    u32 i;
+    memcpy(&id, (const void *)&gSoulLinkRunProfile.identity, sizeof(id));
+    ASSUME(SoulLinkRun_Validate(&id));
+    SoulLink_Init(); ClearSav3(); gSaveFileStatus=SAVE_STATUS_EMPTY;
+    SoulLinkRun_OnLoad(SAVE_STATUS_EMPTY); SoulLinkRun_OnNewGame();
+    EXPECT(SoulLinkRun_ConfirmApplied(&id,0));
+    EXPECT_EQ(TrySavingData(SAVE_NORMAL),SAVE_STATUS_OK);
+    EXPECT_EQ(TrySavingData(SAVE_NORMAL),SAVE_STATUS_OK); // Fill both rotating slots first.
+    gSoulLink.routeState[17]=ROUTE_STATE_DEAD_FORFEITED;
+    EXPECT(!LinkFullSave_Init());
+    for(i=0;i<5;i++) EXPECT(!LinkFullSave_WriteSector());
+    // No final replacement/signature: emulate power interruption before commit.
+    EXPECT_EQ(LoadGameSave(SAVE_NORMAL),SAVE_STATUS_OK);
+    EXPECT_EQ(gSaveBlock3Ptr->soulLink.routeState[17],ROUTE_STATE_OPEN);
+    EXPECT_EQ(SoulLinkRun_GetStatus(),SOULLINK_RUN_RECONCILE);
+    EXPECT(!SoulLinkRun_CanProgress());
+}
+
+TEST("RunProfile: malformed flash sector IDs fail closed without indexing outside the layout")
+{
+    struct SoulLinkRunIdentity id;
+    u32 sector;
+    memcpy(&id, (const void *)&gSoulLinkRunProfile.identity, sizeof(id));
+    ASSUME(SoulLinkRun_Validate(&id));
+    SoulLink_Init(); ClearSav3(); gSaveFileStatus=SAVE_STATUS_EMPTY;
+    SoulLinkRun_OnLoad(SAVE_STATUS_EMPTY); SoulLinkRun_OnNewGame();
+    EXPECT(SoulLinkRun_ConfirmApplied(&id,0));
+    EXPECT_EQ(TrySavingData(SAVE_NORMAL),SAVE_STATUS_OK);
+    EXPECT_EQ(TrySavingData(SAVE_NORMAL),SAVE_STATUS_OK);
+    for(sector=0;sector<28;sector++)
+    {
+        ReadFlash(sector,0,(u8 *)&gSaveDataBuffer,SECTOR_SIZE);
+        gSaveDataBuffer.id=0xFFFF;
+        EXPECT_EQ(ProgramFlashSectorAndVerify(sector,(u8 *)&gSaveDataBuffer),0);
+    }
+    EXPECT_EQ(LoadGameSave(SAVE_NORMAL),SAVE_STATUS_CORRUPT);
+    EXPECT_EQ(SoulLinkRun_GetStatus(),SOULLINK_RUN_CORRUPT);
+    EXPECT(!SoulLinkRun_CanProgress());
+}
+
+TEST("RunProfile: lost critical capture cannot be hidden by an empty queue or a new plan")
+{
+    struct SoulLinkRunIdentity id;
+    memcpy(&id,(const void *)&gSoulLinkRunProfile.identity,sizeof(id));
+    ASSUME(SoulLinkRun_Validate(&id));
+    SoulLink_Init();ClearSav3();gSaveFileStatus=SAVE_STATUS_EMPTY;
+    SoulLinkRun_OnLoad(SAVE_STATUS_EMPTY);SoulLinkRun_OnNewGame();
+    gSoulLink.criticalOverflowCount=1;
+    gSoulLink.eventTail=gSoulLink.eventHead;
+    EXPECT(!SoulLinkRun_ConfirmApplied(&id,0));
+    EXPECT(!SoulLinkRun_CanProgress());
+    EXPECT_EQ(SoulLinkRun_GetStatus(),SOULLINK_RUN_CORRUPT);
+    EXPECT_EQ(TrySavingData(SAVE_NORMAL),SAVE_STATUS_ERROR);
 }
