@@ -32,8 +32,9 @@ enum {
 };
 
 #define VERSION_BANNER_RIGHT_TILEOFFSET 64
-#define VERSION_BANNER_LEFT_X 98
-#define VERSION_BANNER_RIGHT_X 162
+#define VERSION_BANNER_LEFT_X 56
+#define VERSION_BANNER_MIDDLE_X 120
+#define VERSION_BANNER_RIGHT_X 184
 #define VERSION_BANNER_Y 2
 #define VERSION_BANNER_Y_GOAL 66
 #define START_BANNER_X 128
@@ -154,6 +155,12 @@ static const union AnimCmd sVersionBannerRightAnimSequence[] =
     ANIMCMD_END,
 };
 
+static const union AnimCmd sVersionBannerThirdAnimSequence[] =
+{
+    ANIMCMD_FRAME(VERSION_BANNER_RIGHT_TILEOFFSET * 2, 30),
+    ANIMCMD_END,
+};
+
 static const union AnimCmd *const sVersionBannerLeftAnimTable[] =
 {
     sVersionBannerLeftAnimSequence,
@@ -162,6 +169,7 @@ static const union AnimCmd *const sVersionBannerLeftAnimTable[] =
 static const union AnimCmd *const sVersionBannerRightAnimTable[] =
 {
     sVersionBannerRightAnimSequence,
+    sVersionBannerThirdAnimSequence,
 };
 
 static const struct SpriteTemplate sVersionBannerLeftSpriteTemplate =
@@ -186,7 +194,7 @@ static const struct CompressedSpriteSheet sSpriteSheet_EmeraldVersion[] =
 {
     {
         .data = gTitleScreenEmeraldVersionGfx,
-        .size = 0x1000,
+        .size = 0x1800, // 192 x 32, three 64 x 32 sections
         .tag = TAG_VERSION
     },
     {},
@@ -715,8 +723,13 @@ static void Task_TitleScreenPhase1(u8 taskId)
         gSprites[spriteId].sAlphaBlendIdx = ARRAY_COUNT(gTitleScreenAlphaBlend);
         gSprites[spriteId].sParentTaskId = taskId;
 
-        // Create right side of version banner
+        // Create middle section of the Soul - Emerald Version banner
+        spriteId = CreateSprite(&sVersionBannerRightSpriteTemplate, VERSION_BANNER_MIDDLE_X, VERSION_BANNER_Y, 0);
+        gSprites[spriteId].sParentTaskId = taskId;
+
+        // Create third section, with the same rise/fade behavior as the middle
         spriteId = CreateSprite(&sVersionBannerRightSpriteTemplate, VERSION_BANNER_RIGHT_X, VERSION_BANNER_Y, 0);
+        StartSpriteAnim(&gSprites[spriteId], 1);
         gSprites[spriteId].sParentTaskId = taskId;
 
         gTasks[taskId].tCounter = 144;
