@@ -42,6 +42,8 @@ typedef uint8_t bool8;
 #define SOULLINK_PROTOCOL_VERSION 1
 
 // Capability flags (bitmask in mailbox.capabilities)
+#define SOULLINK_FLAG_MANAGED_ADAPTER 0x80 // Host-controlled neutral profile launcher; not a save identity.
+
 #define SOULLINK_CAP_EVENT_QUEUE       (1 << 0)
 #define SOULLINK_CAP_CMD_QUEUE         (1 << 1)
 #define SOULLINK_CAP_LOBBY_MANAGEMENT  (1 << 2)
