@@ -1382,6 +1382,7 @@ static EWRAM_DATA struct {
     bool8 deferred;
     bool8 partyMoved;
     bool8 livingBox;
+    bool8 partyAffected;
 } sKillWork = {0};
 
 static EWRAM_DATA u16 sPendingPlanToken = 0;
@@ -1399,34 +1400,38 @@ static u8 StepKillMon(const struct SoulLinkCommand *cmd)
         sKillWork.sequence = cmd->sequenceId;
         sKillWork.deferred = gPokemonStoragePtr == NULL;
     }
-    // One party member, or four PC entries per iteration. No whole-PC helper is
+    // Two party members, or twelve PC entries per iteration. No whole-PC helper is
     // called at completion, including the whiteout decision.
     if (sKillWork.cursor < PARTY_SIZE)
     {
-        u16 index = PARTY_SIZE - 1 - sKillWork.cursor++;
-        struct Pokemon *mon = &gParties[B_TRAINER_PLAYER][index];
-        if (GetMonData(mon, MON_DATA_SPECIES) != SPECIES_NONE
-         && !GetMonData(mon, MON_DATA_IS_EGG)
-         && SoulLink_GetEncounterIdForMon(mon) == cmd->targetMapSec)
+        for (n = 0; n < 2 && sKillWork.cursor < PARTY_SIZE; n++)
         {
-            u16 zero = 0;
-            s16 freeSpot = gPokemonStoragePtr ? FindGraveyardSpace() : -1;
-            mon->box.isDead = TRUE;
-            SetMonData(mon, MON_DATA_HP, &zero);
-            if (freeSpot >= 0)
+            u16 index = PARTY_SIZE - 1 - sKillWork.cursor++;
+            struct Pokemon *mon = &gParties[B_TRAINER_PLAYER][index];
+            if (GetMonData(mon, MON_DATA_SPECIES) != SPECIES_NONE
+             && !GetMonData(mon, MON_DATA_IS_EGG)
+             && SoulLink_GetEncounterIdForMon(mon) == cmd->targetMapSec)
             {
-                SetBoxMonAt(SOULLINK_GRAVEYARD_BOX, freeSpot, &mon->box);
-                ZeroMonData(mon);
-                sKillWork.partyMoved = TRUE;
+                u16 zero = 0;
+                s16 freeSpot = gPokemonStoragePtr ? FindGraveyardSpace() : -1;
+                sKillWork.partyAffected = TRUE;
+                mon->box.isDead = TRUE;
+                SetMonData(mon, MON_DATA_HP, &zero);
+                if (freeSpot >= 0)
+                {
+                    SetBoxMonAt(SOULLINK_GRAVEYARD_BOX, freeSpot, &mon->box);
+                    ZeroMonData(mon);
+                    sKillWork.partyMoved = TRUE;
+                }
+                else
+                    sKillWork.deferred = TRUE;
             }
-            else
-                sKillWork.deferred = TRUE;
+            if (sKillWork.cursor == PARTY_SIZE && sKillWork.partyMoved)
+                CompactPartySlots();
         }
-        if (sKillWork.cursor == PARTY_SIZE && sKillWork.partyMoved)
-            CompactPartySlots();
         return SOULLINK_CMD_STATUS_PENDING;
     }
-    for (n = 0; n < 4 && sKillWork.cursor < PARTY_SIZE + TOTAL_BOXES_COUNT * IN_BOX_COUNT; n++)
+    for (n = 0; n < 12 && sKillWork.cursor < PARTY_SIZE + TOTAL_BOXES_COUNT * IN_BOX_COUNT; n++)
     {
         u16 pc = sKillWork.cursor++ - PARTY_SIZE;
         struct BoxPokemon *mon;
@@ -1458,7 +1463,7 @@ static u8 StepKillMon(const struct SoulLinkCommand *cmd)
     SoulLink_SaveToSaveBlock3();
     if (sKillWork.deferred)
         return SOULLINK_CMD_STATUS_DEFERRED;
-    if (SoulLink_IsPartyWiped())
+    if (sKillWork.partyAffected && SoulLink_IsPartyWiped())
     {
         if (!sKillWork.livingBox)
             SoulLink_EmitEvent(SOULLINK_EVENT_WIPE, cmd->targetMapSec, 0, 0, 0);
@@ -1482,7 +1487,12 @@ void SoulLink_ProcessOverworldCommands(void)
         // Menus/storage/scripts may move Pokemon behind the scan cursor. Retain
         // effects but restart the pending command when safe processing resumes.
         if (sKillWork.partyMoved) CompactPartySlots();
-        ResetKillWork();
+        // Restart the scan after storage movement, retaining the fact that this
+        // same command affected a party member before the interruption.
+        sKillWork.cursor = 0;
+        sKillWork.deferred = FALSE;
+        sKillWork.partyMoved = FALSE;
+        sKillWork.livingBox = FALSE;
         return;
     }
 

@@ -1191,7 +1191,7 @@ static void Task_SoulLinkMenu_Main(u8 taskId)
                 if ((sMenuCursor == SOULLINK_OPTION_HOST || sMenuCursor == SOULLINK_OPTION_JOIN)
                  && runStatus != SOULLINK_RUN_SOLO)
                 {
-                    SetErrorMessage((const u8 *)"PROFILE ALREADY ASSIGNED\nUse Reconnect for this run.\nCreate fresh Host/Join profiles\nwith the external launcher.");
+                    SetErrorMessage((const u8 *)"PROFILE ALREADY ASSIGNED\nUse Reconnect for this run.\nCreate fresh Host/Join profiles\nwith the adapter profile selector.");
                     sPrevScreen = SOULLINK_SCREEN_MAIN;
                     sScreen = SOULLINK_SCREEN_ERROR;
                     RenderCurrentScreen();
@@ -1214,18 +1214,20 @@ static void Task_SoulLinkMenu_Main(u8 taskId)
                     RenderCurrentScreen();
                     break;
                 }
-#if !SOULLINK_DEV_TEST
-                if (runStatus == SOULLINK_RUN_SOLO)
-                {
-                    SetErrorMessage((const u8 *)"MULTIPLAYER RUN REQUIRED\nSolo saves cannot become multiplayer.\nUse profile launcher to create a\nnew isolated multiplayer run profile.");
-                    sPrevScreen = SOULLINK_SCREEN_MAIN;
-                    sScreen = SOULLINK_SCREEN_ERROR;
-                    RenderCurrentScreen();
-                    break;
-                }
-#endif
+
             }
 
+#if !SOULLINK_DEV_TEST
+            if (runStatus == SOULLINK_RUN_SOLO && sMenuCursor != SOULLINK_OPTION_EXIT
+             && !(gSoulLink.mailboxFlags & SOULLINK_FLAG_MANAGED_ADAPTER))
+            {
+                SetErrorMessage((const u8 *)"ACTIVATE SOUL LINK ADAPTER\nOpen the adapter's lobby ROM.\nSolo progress is never imported.");
+                sPrevScreen = SOULLINK_SCREEN_MAIN;
+                sScreen = SOULLINK_SCREEN_ERROR;
+                RenderCurrentScreen();
+                break;
+            }
+#endif
             switch (sMenuCursor)
             {
             case SOULLINK_OPTION_HOST:
