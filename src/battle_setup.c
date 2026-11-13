@@ -49,6 +49,7 @@
 #include "overworld.h"
 #include "vs_seeker.h"
 #include "soullink.h"
+#include "soullink_run.h"
 #include "wild_encounter_ow.h"
 #include "window.h"
 #include "constants/battle_frontier.h"
@@ -1473,6 +1474,9 @@ void ClearTrainerFlag(u16 trainerId)
 
 void BattleSetup_StartTrainerBattle(void)
 {
+    if (!SoulLinkRun_CanProgress())
+        return;
+
     if (gNoOfApproachingTrainers == 2)
     {
         if (FollowerNPCIsBattlePartner())

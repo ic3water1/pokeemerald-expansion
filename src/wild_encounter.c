@@ -23,6 +23,7 @@
 #include "tv.h"
 #include "wild_encounter.h"
 #include "soullink.h"
+#include "soullink_run.h"
 #include "battle_debug.h"
 #include "battle_pike.h"
 #include "battle_pyramid.h"
@@ -605,6 +606,9 @@ static bool8 EncounterOddsCheck(u16 encounterRate)
 // Returns true if it will try to create a wild encounter.
 static bool8 WildEncounterCheck(u32 encounterRate, bool8 ignoreAbility)
 {
+    if (!SoulLinkRun_CanProgress())
+        return FALSE;
+
     encounterRate *= 16;
     if (TestPlayerAvatarFlags(PLAYER_AVATAR_FLAG_MACH_BIKE | PLAYER_AVATAR_FLAG_ACRO_BIKE))
         encounterRate = encounterRate * 80 / 100;
@@ -670,6 +674,9 @@ bool8 StandardWildEncounter(u16 curMetatileBehavior, u16 prevMetatileBehavior)
     struct Roamer *roamer;
 
     if (sWildEncountersDisabled == TRUE)
+        return FALSE;
+
+    if (!SoulLinkRun_CanProgress())
         return FALSE;
 
     if (CalculatePlayerPartyCount() == 0 || SoulLink_GetLivingPokemonCount() == 0)
@@ -859,6 +866,9 @@ bool8 SweetScentWildEncounter(void)
     s16 x, y;
     u32 headerId;
     enum TimeOfDay timeOfDay;
+
+    if (!SoulLinkRun_CanProgress())
+        return FALSE;
 
     PlayerGetDestCoords(&x, &y);
     headerId = GetCurrentMapWildMonHeaderId();

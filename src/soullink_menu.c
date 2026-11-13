@@ -1,5 +1,6 @@
 #include "global.h"
 #include "soullink.h"
+#include "soullink_run.h"
 #include "soullink_menu.h"
 #include "bg.h"
 #include "gpu_regs.h"
@@ -744,9 +745,27 @@ static void RenderMainScreen(void)
     }
 
     u8 transport = SoulLink_GetTransportState();
-    if (transport == SOULLINK_TRANSPORT_OFFLINE)
+    u8 runStatus = SoulLinkRun_GetStatus();
+
+    if (runStatus == SOULLINK_RUN_FOREIGN)
+    {
+        AddTextPrinterParameterized(WIN_BODY, FONT_SMALL, COMPOUND_STRING("{COLOR RED}{SHADOW LIGHT_RED}Foreign save detected!\nSaveBlock3 profile mismatch.\nSolo save cannot become multiplayer."), 8, 54, TEXT_SKIP_DRAW, NULL);
+    }
+    else if (runStatus == SOULLINK_RUN_CORRUPT)
+    {
+        AddTextPrinterParameterized(WIN_BODY, FONT_SMALL, COMPOUND_STRING("{COLOR RED}{SHADOW LIGHT_RED}Corrupt save metadata!\nSaveBlock3 CRC mismatch.\nSave restore blocked."), 8, 54, TEXT_SKIP_DRAW, NULL);
+    }
+    else if (transport == SOULLINK_TRANSPORT_OFFLINE)
     {
         AddTextPrinterParameterized(WIN_BODY, FONT_SMALL, COMPOUND_STRING("{COLOR RED}{SHADOW LIGHT_RED}No emulator bridge detected.\nOnline play needs mgba_soul_emerald.lua.\nTraditional offline play works normally."), 8, 54, TEXT_SKIP_DRAW, NULL);
+    }
+    else if (runStatus == SOULLINK_RUN_RECONCILE)
+    {
+        AddTextPrinterParameterized(WIN_BODY, FONT_SMALL, COMPOUND_STRING("{COLOR BLUE}{SHADOW LIGHT_BLUE}Reconciliation required.\nConnect bridge to authorize."), 8, 54, TEXT_SKIP_DRAW, NULL);
+    }
+    else if (runStatus == SOULLINK_RUN_AUTHORIZED)
+    {
+        AddTextPrinterParameterized(WIN_BODY, FONT_SMALL, COMPOUND_STRING("{COLOR GREEN}{SHADOW LIGHT_GREEN}Multiplayer run authorized.\nReady to synchronize."), 8, 54, TEXT_SKIP_DRAW, NULL);
     }
     else
     {
@@ -1196,6 +1215,38 @@ static void Task_SoulLinkMenu_Main(u8 taskId)
         else if (JOY_NEW(A_BUTTON))
         {
             PlaySE(SE_SELECT);
+
+            u8 runStatus = SoulLinkRun_GetStatus();
+            if (sMenuCursor != SOULLINK_OPTION_EXIT)
+            {
+                if (runStatus == SOULLINK_RUN_FOREIGN)
+                {
+                    SetErrorMessage((const u8 *)"FOREIGN SAVE DETECTED!\nSaveBlock3 profile mismatch.\nSolo save cannot become multiplayer.");
+                    sPrevScreen = SOULLINK_SCREEN_MAIN;
+                    sScreen = SOULLINK_SCREEN_ERROR;
+                    RenderCurrentScreen();
+                    break;
+                }
+                if (runStatus == SOULLINK_RUN_CORRUPT)
+                {
+                    SetErrorMessage((const u8 *)"CORRUPT SAVE METADATA!\nSaveBlock3 CRC mismatch.\nSave restore blocked.");
+                    sPrevScreen = SOULLINK_SCREEN_MAIN;
+                    sScreen = SOULLINK_SCREEN_ERROR;
+                    RenderCurrentScreen();
+                    break;
+                }
+#if !SOULLINK_DEV_TEST
+                if (runStatus == SOULLINK_RUN_SOLO)
+                {
+                    SetErrorMessage((const u8 *)"MULTIPLAYER RUN REQUIRED\nSolo saves cannot become multiplayer.\nUse profile launcher to create a\nnew isolated multiplayer run profile.");
+                    sPrevScreen = SOULLINK_SCREEN_MAIN;
+                    sScreen = SOULLINK_SCREEN_ERROR;
+                    RenderCurrentScreen();
+                    break;
+                }
+#endif
+            }
+
             switch (sMenuCursor)
             {
             case SOULLINK_OPTION_HOST:

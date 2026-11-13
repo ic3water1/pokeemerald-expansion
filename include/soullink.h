@@ -54,7 +54,7 @@ typedef uint8_t bool8;
 #define SOULLINK_FLAG_DIRTY_STATE              (1 << 2) // Unacknowledged state changes present
 #define SOULLINK_FLAG_RECONNECT_NEEDED         (1 << 3) // Reconnection required
 #define SOULLINK_FLAG_RECONCILIATION_REQUIRED  (1 << 4) // Full state reconciliation needed on reconnect
-#if SOULLINK_DEV_TEST
+#if SOULLINK_DEV_TEST || TESTING
 #define SOULLINK_FLAG_DEV_SAFE_OVERWORLD       (1 << 6) // Automated test: enables safe overworld simulation (dev build only)
 #endif
 
@@ -107,6 +107,7 @@ enum SoulLinkCommandType {
     SOULLINK_CMD_LOCK_ROUTE = 2,
     SOULLINK_CMD_UNLOCK_GYM = 3,
     SOULLINK_CMD_TRIGGER_WIPE = 4,
+    SOULLINK_CMD_CONFIRM_PLAN = 5,
 };
 
 // Incoming Command Execution Status
@@ -261,6 +262,7 @@ struct PlayerSyncInfo {
 #define SOULLINK_OFFSET_PLAYER_COUNT        0x01DC
 #define SOULLINK_OFFSET_UNLOCKED_GYM        0x01DD
 #define SOULLINK_OFFSET_ROUTE_STATE         0x01DE
+#define SOULLINK_OFFSET_RUN_STATUS          0x02B3
 #define SOULLINK_OFFSET_ROUTE_SPECIES       0x02B4
 #define SOULLINK_OFFSET_ROUTE_TYPES_MASK    0x1004
 #define SOULLINK_OFFSET_PLAYERS             0x1358
@@ -300,7 +302,7 @@ struct SoulLinkMailbox {
     u8 playerCount;                             // 0x01DC (1 byte)
     u8 unlockedGymStage;                        // 0x01DD (1 byte)
     u8 routeState[NUM_MAPSECS];                 // 0x01DE (213 bytes)
-    u8 paddingRoute;                            // 0x02B3 (1 byte, align to 2 bytes)
+    u8 runStatus;                               // 0x02B3 (1 byte, enum SoulLinkRunStatus)
     u16 routeSpecies[NUM_MAPSECS][MAX_PLAYERS]; // 0x02B4 (213 * 8 * 2 = 3408 bytes = 0x0D50)
     u32 routeTypesMask[NUM_MAPSECS];            // 0x1004 (213 * 4 = 852 bytes = 0x0354)
     struct PlayerSyncInfo players[MAX_PLAYERS]; // 0x1358 (8 * 16 = 128 bytes = 0x80)

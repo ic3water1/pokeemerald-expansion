@@ -1,4 +1,5 @@
 #include "global.h"
+#include "soullink_run.h"
 #include "clock.h"
 #include "new_game.h"
 #include "random.h"
@@ -179,6 +180,7 @@ void NewGameInitData(void)
     ClearSav1();
     ClearSav3();
     SoulLink_NewGame();
+    SoulLinkRun_OnNewGame();
     ClearAllMail();
     gSaveBlock2Ptr->specialSaveWarpFlags = 0;
     gSaveBlock2Ptr->gcnLinkFlags = 0;

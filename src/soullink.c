@@ -1,4 +1,5 @@
 #include "soullink.h"
+#include "soullink_run.h"
 
 #if __has_include("global.h")
 #include "global.h"
@@ -114,9 +115,9 @@ void SoulLink_Init(void)
     memset(&gSoulLink.lobbyRequest, 0, sizeof(gSoulLink.lobbyRequest));
     memset(&gSoulLink.lobbyResponse, 0, sizeof(gSoulLink.lobbyResponse));
 
-    // Initial player count and alignment padding
+    // Initial player count and run status
     gSoulLink.playerCount = 1;
-    gSoulLink.paddingRoute = 0;
+    gSoulLink.runStatus = SoulLinkRun_GetStatus();
 
     // Initialize local player (Slot 0)
     for (p = 0; p < MAX_PLAYERS; p++)
@@ -443,6 +444,11 @@ u16 SoulLink_GetEncounterIdForMon(struct Pokemon *mon)
  */
 bool8 SoulLink_CanCatchOnCurrentMap(void)
 {
+    if (!SoulLinkRun_CanProgress())
+    {
+        return FALSE;
+    }
+
     u16 encounterId = SoulLink_GetEncounterId();
 
     if (encounterId >= NUM_MAPSECS)
@@ -460,6 +466,11 @@ bool8 SoulLink_CanCatchOnCurrentMap(void)
  */
 void SoulLink_OnWildBattleStart(void)
 {
+    if (!SoulLinkRun_CanProgress())
+    {
+        return;
+    }
+
     u16 encounterId = SoulLink_GetEncounterId();
 
     if (encounterId < NUM_MAPSECS && gSoulLink.routeState[encounterId] == ROUTE_STATE_OPEN)
@@ -1397,6 +1408,17 @@ void SoulLink_ProcessOverworldCommands(void)
         case SOULLINK_CMD_TRIGGER_WIPE:
             // Synchronized game-over screen is deferred to Phase 5
             cmd->executionStatus = SOULLINK_CMD_STATUS_UNIMPLEMENTED;
+            break;
+
+        case SOULLINK_CMD_CONFIRM_PLAN:
+            if (SoulLinkRun_ConfirmApplied(&gSaveBlock3Ptr->runIntegrity.identity, cmd->paramValue))
+            {
+                cmd->executionStatus = SOULLINK_CMD_STATUS_SUCCESS;
+            }
+            else
+            {
+                cmd->executionStatus = SOULLINK_CMD_STATUS_REJECTED;
+            }
             break;
 
         default:

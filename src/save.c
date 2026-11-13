@@ -3,6 +3,7 @@
 #include "gba/flash_internal.h"
 #include "fieldmap.h"
 #include "save.h"
+#include "soullink_run.h"
 #include "task.h"
 #include "decompress.h"
 #include "load_save.h"
@@ -99,6 +100,9 @@ EWRAM_DATA struct SaveSector gSaveDataBuffer = {0}; // Buffer used for reading/w
 void ClearSaveData(void)
 {
     u16 i;
+
+    if (!SoulLinkRun_CanProgress())
+        return;
 
     // Clear the full save two sectors at a time
     for (i = 0; i < SECTORS_COUNT / 2; i++)
@@ -203,6 +207,8 @@ static u8 HandleWriteSector(u16 sectorId, const struct SaveSectorLocation *locat
     for (i = 0; i < size; i++)
         gReadWriteSector->data[i] = data[i];
 
+    if (!SoulLinkRun_PrepareSave())
+        return SAVE_STATUS_ERROR;
     CopyFromSaveBlock3(sectorId, gReadWriteSector);
 
     gReadWriteSector->checksum = CalculateChecksum(data, size);
@@ -715,6 +721,8 @@ u8 HandleSavingData(u8 saveType)
     u8 i;
     u32 *backupVar = gTrainerHillVBlankCounter;
 
+    if (!SoulLinkRun_PrepareSave())
+        return SAVE_STATUS_ERROR;
     gTrainerHillVBlankCounter = NULL;
     UpdateSaveAddresses();
     switch (saveType)
@@ -772,6 +780,11 @@ u8 HandleSavingData(u8 saveType)
 
 u8 TrySavingData(u8 saveType)
 {
+    if (!SoulLinkRun_PrepareSave())
+    {
+        gSaveAttemptStatus = SAVE_STATUS_ERROR;
+        return SAVE_STATUS_ERROR;
+    }
     if (gFlashMemoryPresent != TRUE)
     {
         gSaveAttemptStatus = SAVE_STATUS_ERROR;
@@ -794,7 +807,7 @@ u8 TrySavingData(u8 saveType)
 
 bool8 LinkFullSave_Init(void)
 {
-    if (gFlashMemoryPresent != TRUE)
+    if (gFlashMemoryPresent != TRUE || !SoulLinkRun_PrepareSave())
         return TRUE;
     UpdateSaveAddresses();
     CopyPartyAndObjectsToSave();
@@ -893,6 +906,7 @@ u8 LoadGameSave(u8 saveType)
     default:
         status = TryLoadSaveSlot(FULL_SAVE_SLOT, gRamSaveSectorLocations);
         CopyPartyAndObjectsFromSave();
+        SoulLinkRun_OnLoad(status);
         gSaveFileStatus = status;
         gGameContinueCallback = NULL;
         break;
@@ -967,6 +981,9 @@ u32 TryWriteSpecialSaveSector(u8 sector, u8 *src)
     s32 size;
     u8 *savData;
     void *savDataBuffer;
+
+    if (!SoulLinkRun_PrepareSave())
+        return SAVE_STATUS_ERROR;
 
     if (sector != SECTOR_ID_TRAINER_HILL && sector != SECTOR_ID_RECORDED_BATTLE)
         return SAVE_STATUS_ERROR;
