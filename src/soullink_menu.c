@@ -187,7 +187,23 @@ static EWRAM_DATA u8 sGridSpriteIds[16] = {0};
 static EWRAM_DATA u8 sSlotSpriteIds[4] = {0};
 static EWRAM_DATA u8 sLobbyFaceSpriteIds[4] = {0};
 static EWRAM_DATA bool8 sSpritesInitialized = FALSE;
-ALIGNED(4) EWRAM_DATA static u8 sFaceIconTiles[16][1024] = {{0}};
+// Raw two-frame tile pointers match UpdateMonIconFrame's native ABI.
+#if P_GENDER_DIFFERENCES
+#if P_GBA_STYLE_SPECIES_ICONS
+ALIGNED(4) static const u8 sFaceIconTiles[] = INCBIN_U8("graphics/soullink/faces_gba_female.4bpp");
+#else
+ALIGNED(4) static const u8 sFaceIconTiles[] = INCBIN_U8("graphics/soullink/faces_female.4bpp");
+#endif
+#else
+#if P_GBA_STYLE_SPECIES_ICONS
+ALIGNED(4) static const u8 sFaceIconTiles[] = INCBIN_U8("graphics/soullink/faces_gba.4bpp");
+#else
+ALIGNED(4) static const u8 sFaceIconTiles[] = INCBIN_U8("graphics/soullink/faces.4bpp");
+#endif
+#endif
+#if TESTING
+const u8 *SoulLink_TestFaceTiles(u8 index) { return sFaceIconTiles + index * 1024; }
+#endif
 
 // Forward declarations
 static void Task_SoulLinkMenu_Main(u8 taskId);
@@ -200,7 +216,7 @@ static void UpdateGridCursorAnimation(void);
 static void DestroyLobbyFaceSprites(void);
 static void CreateLobbyFaceSprites(void);
 static void DestroyAllMenuSprites(void);
-static void InitSoulLinkFaceIcons(void);
+
 static u8 CreateFaceIconSprite(u8 faceIndex, s16 x, s16 y, u8 subpriority);
 
 // Exported Face Code Helpers
@@ -379,7 +395,9 @@ static void UpdateGridCursorAnimation(void)
             if (i == sFaceGridCursor)
             {
                 sprite->callback = SpriteCB_MonIcon;
-                sprite->animPaused = FALSE;
+                // Native icon callbacks advance raw tile frames themselves. The
+                // generic descriptor animator must remain paused for raw images.
+                sprite->animPaused = TRUE;
             }
             else
             {
@@ -388,56 +406,6 @@ static void UpdateGridCursorAnimation(void)
                 sprite->animCmdIndex = 0;
                 sprite->animDelayCounter = 0;
                 UpdateMonIconFrame(sprite);
-            }
-        }
-    }
-}
-
-static void InitSoulLinkFaceIcons(void)
-{
-    static const u8 sFaceCutoffs[16] = {
-        [0] = 22,  // Pikachu: head rows 10..22 (height 13), trim body 23..31
-        [1] = 22,  // Bulbasaur: head rows 11..22 (height 12), trim body 23..31
-        [2] = 21,  // Charmander: head rows 11..21 (height 11), trim body 22..31
-        [3] = 21,  // Squirtle: head rows 13..21 (height 9), trim body 22..31
-        [4] = 21,  // Eevee: head rows 12..21 (height 10), trim body 22..31
-        [5] = 26,  // Jigglypuff: sphere face rows 10..26, trim feet 27..31
-        [6] = 20,  // Meowth: head rows 9..20 (height 12), trim body 21..31
-        [7] = 24,  // Gengar: ghost face rows 7..24 (height 18), trim feet 25..31
-        [8] = 20,  // Treecko: head rows 9..20 (height 12), trim body 21..31
-        [9] = 20,  // Torchic: head rows 10..20 (height 11), trim body 21..31
-        [10] = 22, // Mudkip: head rows 11..22 (height 12), trim body 23..31
-        [11] = 20, // Ralts: head rows 11..20 (height 10), trim body 21..31
-        [12] = 26, // Lotad: lily pad & beak rows 13..26 (height 14), trim 27..31
-        [13] = 27, // Spheal: sphere face rows 13..27 (height 15), trim 28..31
-        [14] = 21, // Sableye: head rows 9..21 (height 13), trim body 22..31
-        [15] = 20, // Absol: head & horn rows 7..20 (height 14), trim body 21..31
-    };
-
-    u8 i, f, y, tx, b;
-    for (i = 0; i < 16; i++)
-    {
-        const u8 *srcTiles = GetMonIconTiles(sFaceCodeSpecies[i], 0);
-        if (srcTiles == NULL)
-            continue;
-
-        memcpy(sFaceIconTiles[i], srcTiles, 1024);
-
-        u8 cutoff = sFaceCutoffs[i];
-        for (f = 0; f < 2; f++)
-        {
-            for (y = cutoff + 1; y < 32; y++)
-            {
-                u8 ty = y / 8;
-                u8 r = y % 8;
-                for (tx = 0; tx < 4; tx++)
-                {
-                    u16 offset = (f * 16 + ty * 4 + tx) * 32 + r * 4;
-                    for (b = 0; b < 4; b++)
-                    {
-                        sFaceIconTiles[i][offset + b] = 0;
-                    }
-                }
             }
         }
     }
@@ -456,7 +424,7 @@ static u8 CreateFaceIconSprite(u8 faceIndex, s16 x, s16 y, u8 subpriority)
         gSprites[spriteId].animBeginning = FALSE;
         gSprites[spriteId].animCmdIndex = 0; // Force immediate frame 0 copy (Finding 11)
         gSprites[spriteId].animDelayCounter = 0;
-        gSprites[spriteId].images = (const struct SpriteFrameImage *)sFaceIconTiles[faceIndex];
+        gSprites[spriteId].images = (const struct SpriteFrameImage *)(sFaceIconTiles + faceIndex * 1024);
         UpdateMonIconFrame(&gSprites[spriteId]);
     }
     return spriteId;
@@ -600,7 +568,7 @@ void CB2_InitSoulLinkMenu(void)
         LoadPalette(GetWindowFrameTilesPal(gSaveBlock2Ptr->optionsWindowFrameType)->pal, BG_PLTT_ID(7), PLTT_SIZE_4BPP);
         LoadPalette(sSoulLinkText_Pal, BG_PLTT_ID(1), sizeof(sSoulLinkText_Pal));
         LoadMonIconPalettes();
-        InitSoulLinkFaceIcons();
+
         gMain.state++;
         break;
     case 5:
@@ -1219,6 +1187,17 @@ static void Task_SoulLinkMenu_Main(u8 taskId)
             u8 runStatus = SoulLinkRun_GetStatus();
             if (sMenuCursor != SOULLINK_OPTION_EXIT)
             {
+#if !SOULLINK_DEV_TEST
+                if ((sMenuCursor == SOULLINK_OPTION_HOST || sMenuCursor == SOULLINK_OPTION_JOIN)
+                 && runStatus != SOULLINK_RUN_SOLO)
+                {
+                    SetErrorMessage((const u8 *)"PROFILE ALREADY ASSIGNED\nUse Reconnect for this run.\nCreate fresh Host/Join profiles\nwith the external launcher.");
+                    sPrevScreen = SOULLINK_SCREEN_MAIN;
+                    sScreen = SOULLINK_SCREEN_ERROR;
+                    RenderCurrentScreen();
+                    break;
+                }
+#endif
                 if (runStatus == SOULLINK_RUN_FOREIGN)
                 {
                     SetErrorMessage((const u8 *)"FOREIGN SAVE DETECTED!\nSaveBlock3 profile mismatch.\nSolo save cannot become multiplayer.");
@@ -1641,3 +1620,49 @@ static void Task_SoulLinkMenu_Main(u8 taskId)
         break;
     }
 }
+
+#if TESTING
+// Exercise both the native callback and generic animator against real OBJ VRAM.
+// Raw icon pointers must never be consumed as SpriteFrameImage descriptors.
+bool8 SoulLink_TestFaceVram(u16 *highWater)
+{
+    u32 frame, i, byte;
+    bool8 valid = TRUE;
+    extern u16 gSoulLinkTestSpriteCopyHighWater;
+    ResetSpriteData();
+    FreeAllSpritePalettes();
+    LoadMonIconPalettes();
+    InitSpriteIds();
+    sNumSelectedFaces = 4;
+    for (i = 0; i < 4; i++) sSelectedFaces[i] = i * 4;
+    sFaceGridCursor = 0;
+    CreateJoinGridSprites();
+    for (frame = 0; frame < 120 && valid; frame++)
+    {
+        AnimateSprites();
+        BuildOamBuffer();
+        ProcessSpriteCopyRequests();
+        for (i = 0; i < 20; i++)
+        {
+            u8 id = i < 16 ? sGridSpriteIds[i] : sSlotSpriteIds[i - 16];
+            u8 face = i < 16 ? i : sSelectedFaces[i - 16];
+            const u8 *actual;
+            bool8 same0 = TRUE, same1 = i < 16;
+            if (id >= MAX_SPRITES) { valid = FALSE; break; }
+            actual = (const u8 *)(OBJ_VRAM0 + gSprites[id].oam.tileNum * 32);
+            for (byte = 0; byte < 512; byte++)
+            {
+                if (actual[byte] != sFaceIconTiles[face * 1024 + byte]) same0 = FALSE;
+                if (actual[byte] != sFaceIconTiles[face * 1024 + 512 + byte]) same1 = FALSE;
+            }
+            if (!same0 && !same1) { valid = FALSE; break; }
+        }
+    }
+    *highWater = gSoulLinkTestSpriteCopyHighWater;
+    DestroyJoinGridSprites();
+    FreeMonIconPalettes();
+    ResetSpriteData();
+    sNumSelectedFaces = 0;
+    return valid;
+}
+#endif

@@ -47,6 +47,7 @@ typedef uint8_t bool8;
 #define SOULLINK_CAP_LOBBY_MANAGEMENT  (1 << 2)
 #define SOULLINK_CAP_RECONNECT_TOKEN   (1 << 3)
 #define SOULLINK_CAP_STABLE_ENCOUNTERS (1 << 4)
+#define SOULLINK_CAP_RUN_FENCE_V2      (1 << 5)
 
 // Mailbox status & overflow flags (mailbox.mailboxFlags)
 #define SOULLINK_FLAG_QUEUE_OVERFLOW           (1 << 0) // Non-critical event dropped
@@ -108,6 +109,8 @@ enum SoulLinkCommandType {
     SOULLINK_CMD_UNLOCK_GYM = 3,
     SOULLINK_CMD_TRIGGER_WIPE = 4,
     SOULLINK_CMD_CONFIRM_PLAN = 5,
+    SOULLINK_CMD_AUTHORIZE_PLAN = 6,
+    SOULLINK_CMD_EVENT_FLOOR = 7,
 };
 
 // Incoming Command Execution Status

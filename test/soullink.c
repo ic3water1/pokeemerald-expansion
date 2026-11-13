@@ -16,6 +16,15 @@
 #include "constants/maps.h"
 #include "constants/region_map_sections.h"
 
+// Existing logical regression checks advance the bounded worker over simulated
+// safe iterations. Unsafe states get one call and must retain the entire queue.
+static void DrainSoulLinkCommands(void)
+{
+    u32 iterations = 0;
+    do { SoulLink_ProcessOverworldCommands(); }
+    while (SoulLink_IsSafeOverworldState() && SoulLink_GetPendingCommandCount() && ++iterations < 4096);
+}
+
 TEST("SoulLink: 32-bit type mask correctly stores all types up to TYPE_STELLAR without overflow")
 {
     SoulLink_Init();
@@ -299,7 +308,8 @@ TEST("SoulLink: Retained dead Pokemon cannot be healed alive and are swept when 
     EXPECT_EQ(GetFirstFreeBoxSpot(SOULLINK_GRAVEYARD_BOX), 0);
 
     // 7. Sweep retained dead mons
-    SoulLink_SweepRetainedDeadMons();
+    for (u32 sweep = 0; sweep < 110; sweep++)
+        SoulLink_SweepRetainedDeadMons();
 
     // 8. Treecko must now be transferred to Graveyard box and removed from party
     EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_SPECIES), SPECIES_NONE);
@@ -902,7 +912,7 @@ TEST("SoulLink: Incoming command ring buffer deferred in battle and executed in 
 
     // Simulate in-battle state: execution must be deferred
     SoulLink_TestSetSafeOverworldOverride(TRUE, FALSE);
-    SoulLink_ProcessOverworldCommands();
+    DrainSoulLinkCommands();
 
     // Commands must remain untouched in buffer
     EXPECT_EQ(SoulLink_GetPendingCommandCount(), 2);
@@ -911,7 +921,7 @@ TEST("SoulLink: Incoming command ring buffer deferred in battle and executed in 
 
     // Return to overworld: execution proceeds safely
     SoulLink_TestSetSafeOverworldOverride(TRUE, TRUE);
-    SoulLink_ProcessOverworldCommands();
+    DrainSoulLinkCommands();
 
     EXPECT_EQ(SoulLink_GetPendingCommandCount(), 0);
     EXPECT_EQ(gSoulLink.routeState[MAPSEC_ROUTE_105], ROUTE_STATE_DEAD_FORFEITED);
@@ -936,7 +946,7 @@ TEST("SoulLink: Malformed and unknown commands are safely ignored without memory
     EXPECT_EQ(SoulLink_GetPendingCommandCount(), 1);
 
     SoulLink_TestSetSafeOverworldOverride(TRUE, TRUE);
-    SoulLink_ProcessOverworldCommands();
+    DrainSoulLinkCommands();
     SoulLink_TestSetSafeOverworldOverride(FALSE, FALSE);
 
     // Command queue must be safely drained without crash or corrupted route state
@@ -1097,7 +1107,7 @@ TEST("SoulLink: Incoming commands enforce duplicate/replay protection, execution
     cmd.paramValue = 2;
     cmd.executionStatus = SOULLINK_CMD_STATUS_PENDING;
     SoulLink_ReceiveCommand(&cmd);
-    SoulLink_ProcessOverworldCommands();
+    DrainSoulLinkCommands();
 
     EXPECT_EQ(gSoulLink.unlockedGymStage, 2);
     EXPECT_EQ(gSoulLink.lastExecutedCmdSequenceId, 10);
@@ -1108,7 +1118,7 @@ TEST("SoulLink: Incoming commands enforce duplicate/replay protection, execution
     cmd.paramValue = 3; // Even if conflicting param
     cmd.executionStatus = SOULLINK_CMD_STATUS_PENDING;
     SoulLink_ReceiveCommand(&cmd);
-    SoulLink_ProcessOverworldCommands();
+    DrainSoulLinkCommands();
 
     EXPECT_EQ(gSoulLink.unlockedGymStage, 2); // Unchanged!
     EXPECT_EQ(gSoulLink.cmdQueue[1].executionStatus, SOULLINK_CMD_STATUS_DUPLICATE);
@@ -1118,7 +1128,7 @@ TEST("SoulLink: Incoming commands enforce duplicate/replay protection, execution
     cmd.paramValue = 4;
     cmd.executionStatus = SOULLINK_CMD_STATUS_PENDING;
     SoulLink_ReceiveCommand(&cmd);
-    SoulLink_ProcessOverworldCommands();
+    DrainSoulLinkCommands();
 
     EXPECT_EQ(gSoulLink.unlockedGymStage, 2);
     EXPECT_EQ(gSoulLink.cmdQueue[2].executionStatus, SOULLINK_CMD_STATUS_DUPLICATE);
@@ -1128,7 +1138,7 @@ TEST("SoulLink: Incoming commands enforce duplicate/replay protection, execution
     cmd.paramValue = 1;
     cmd.executionStatus = SOULLINK_CMD_STATUS_PENDING;
     SoulLink_ReceiveCommand(&cmd);
-    SoulLink_ProcessOverworldCommands();
+    DrainSoulLinkCommands();
 
     EXPECT_EQ(gSoulLink.unlockedGymStage, 2); // Cannot regress
     EXPECT_EQ(gSoulLink.lastExecutedCmdSequenceId, 11);
@@ -1140,7 +1150,7 @@ TEST("SoulLink: Incoming commands enforce duplicate/replay protection, execution
     cmd.paramValue = 0;
     cmd.executionStatus = SOULLINK_CMD_STATUS_PENDING;
     SoulLink_ReceiveCommand(&cmd);
-    SoulLink_ProcessOverworldCommands();
+    DrainSoulLinkCommands();
 
     EXPECT_EQ(gSoulLink.lastExecutedCmdSequenceId, 11); // Not advanced on UNIMPLEMENTED
     EXPECT_EQ(gSoulLink.cmdQueue[4].executionStatus, SOULLINK_CMD_STATUS_UNIMPLEMENTED);
@@ -1267,7 +1277,7 @@ TEST("SoulLink: Overworld commands execute safely after trainer battle with reta
     // 1. In battle: gMain.callback2 is battle callback (not CB2_Overworld), battle flags set
     gMain.callback2 = NULL;
     gBattleTypeFlags = BATTLE_TYPE_TRAINER;
-    SoulLink_ProcessOverworldCommands();
+    DrainSoulLinkCommands();
 
     // Execution must be deferred while in battle
     EXPECT_EQ(SoulLink_GetPendingCommandCount(), 1);
@@ -1282,7 +1292,7 @@ TEST("SoulLink: Overworld commands execute safely after trainer battle with reta
     UnlockPlayerFieldControls();
 
     EXPECT_EQ(SoulLink_IsSafeOverworldState(), TRUE);
-    SoulLink_ProcessOverworldCommands();
+    DrainSoulLinkCommands();
 
     // Queued command must execute successfully despite retained battle flags!
     EXPECT_EQ(SoulLink_GetPendingCommandCount(), 0);
@@ -1310,7 +1320,7 @@ TEST("SoulLink: Command sequence wraparound 65534 to 65535 to 1 to 2, stale reje
     cmd.paramValue = 1;
     cmd.executionStatus = SOULLINK_CMD_STATUS_PENDING;
     SoulLink_ReceiveCommand(&cmd);
-    SoulLink_ProcessOverworldCommands();
+    DrainSoulLinkCommands();
     EXPECT_EQ(gSoulLink.lastExecutedCmdSequenceId, 65534);
     EXPECT_EQ(gSoulLink.cmdQueue[0].executionStatus, SOULLINK_CMD_STATUS_SUCCESS);
 
@@ -1319,7 +1329,7 @@ TEST("SoulLink: Command sequence wraparound 65534 to 65535 to 1 to 2, stale reje
     cmd.paramValue = 2;
     cmd.executionStatus = SOULLINK_CMD_STATUS_PENDING;
     SoulLink_ReceiveCommand(&cmd);
-    SoulLink_ProcessOverworldCommands();
+    DrainSoulLinkCommands();
     EXPECT_EQ(gSoulLink.lastExecutedCmdSequenceId, 65535);
     EXPECT_EQ(gSoulLink.unlockedGymStage, 2);
 
@@ -1328,7 +1338,7 @@ TEST("SoulLink: Command sequence wraparound 65534 to 65535 to 1 to 2, stale reje
     cmd.paramValue = 3;
     cmd.executionStatus = SOULLINK_CMD_STATUS_PENDING;
     SoulLink_ReceiveCommand(&cmd);
-    SoulLink_ProcessOverworldCommands();
+    DrainSoulLinkCommands();
     EXPECT_EQ(gSoulLink.lastExecutedCmdSequenceId, 1);
     EXPECT_EQ(gSoulLink.unlockedGymStage, 3);
 
@@ -1337,7 +1347,7 @@ TEST("SoulLink: Command sequence wraparound 65534 to 65535 to 1 to 2, stale reje
     cmd.paramValue = 4;
     cmd.executionStatus = SOULLINK_CMD_STATUS_PENDING;
     SoulLink_ReceiveCommand(&cmd);
-    SoulLink_ProcessOverworldCommands();
+    DrainSoulLinkCommands();
     EXPECT_EQ(gSoulLink.lastExecutedCmdSequenceId, 2);
     EXPECT_EQ(gSoulLink.unlockedGymStage, 4);
 
@@ -1346,7 +1356,7 @@ TEST("SoulLink: Command sequence wraparound 65534 to 65535 to 1 to 2, stale reje
     cmd.paramValue = 5;
     cmd.executionStatus = SOULLINK_CMD_STATUS_PENDING;
     SoulLink_ReceiveCommand(&cmd);
-    SoulLink_ProcessOverworldCommands();
+    DrainSoulLinkCommands();
     EXPECT_EQ(gSoulLink.lastExecutedCmdSequenceId, 2); // Unchanged!
     EXPECT_EQ(gSoulLink.unlockedGymStage, 4);          // Unchanged!
     EXPECT_EQ(gSoulLink.cmdQueue[4].executionStatus, SOULLINK_CMD_STATUS_DUPLICATE);
@@ -1355,21 +1365,21 @@ TEST("SoulLink: Command sequence wraparound 65534 to 65535 to 1 to 2, stale reje
     cmd.sequenceId = 1;
     cmd.executionStatus = SOULLINK_CMD_STATUS_PENDING;
     SoulLink_ReceiveCommand(&cmd);
-    SoulLink_ProcessOverworldCommands();
+    DrainSoulLinkCommands();
     EXPECT_EQ(gSoulLink.lastExecutedCmdSequenceId, 2);
     EXPECT_EQ(gSoulLink.cmdQueue[5].executionStatus, SOULLINK_CMD_STATUS_DUPLICATE);
 
     cmd.sequenceId = 65535;
     cmd.executionStatus = SOULLINK_CMD_STATUS_PENDING;
     SoulLink_ReceiveCommand(&cmd);
-    SoulLink_ProcessOverworldCommands();
+    DrainSoulLinkCommands();
     EXPECT_EQ(gSoulLink.lastExecutedCmdSequenceId, 2);
     EXPECT_EQ(gSoulLink.cmdQueue[6].executionStatus, SOULLINK_CMD_STATUS_DUPLICATE);
 
     cmd.sequenceId = 65534;
     cmd.executionStatus = SOULLINK_CMD_STATUS_PENDING;
     SoulLink_ReceiveCommand(&cmd);
-    SoulLink_ProcessOverworldCommands();
+    DrainSoulLinkCommands();
     EXPECT_EQ(gSoulLink.lastExecutedCmdSequenceId, 2);
     EXPECT_EQ(gSoulLink.cmdQueue[7].executionStatus, SOULLINK_CMD_STATUS_DUPLICATE);
 
@@ -1384,7 +1394,7 @@ TEST("SoulLink: Command sequence wraparound 65534 to 65535 to 1 to 2, stale reje
     cmd.paramValue = 5;
     cmd.executionStatus = SOULLINK_CMD_STATUS_PENDING;
     SoulLink_ReceiveCommand(&cmd);
-    SoulLink_ProcessOverworldCommands();
+    DrainSoulLinkCommands();
     EXPECT_EQ(gSoulLink.lastExecutedCmdSequenceId, 1);
     EXPECT_EQ(gSoulLink.unlockedGymStage, 5);
 
@@ -1507,7 +1517,7 @@ TEST("SoulLink: KILL_MON transfers live party member to Graveyard box and compac
     cmd.executionStatus = SOULLINK_CMD_STATUS_PENDING;
 
     EXPECT_EQ(SoulLink_ReceiveCommand(&cmd), TRUE);
-    SoulLink_ProcessOverworldCommands();
+    DrainSoulLinkCommands();
 
     // Verify command executed successfully
     EXPECT_EQ(gSoulLink.cmdQueue[0].executionStatus, SOULLINK_CMD_STATUS_SUCCESS);
@@ -1530,7 +1540,7 @@ TEST("SoulLink: KILL_MON transfers live party member to Graveyard box and compac
     cmd.executionStatus = SOULLINK_CMD_STATUS_PENDING;
 
     EXPECT_EQ(SoulLink_ReceiveCommand(&cmd), TRUE);
-    SoulLink_ProcessOverworldCommands();
+    DrainSoulLinkCommands();
     EXPECT_EQ(gSoulLink.cmdQueue[1].executionStatus, SOULLINK_CMD_STATUS_SUCCESS);
     EXPECT_EQ(CountMonsInBox(SOULLINK_GRAVEYARD_BOX), 1); // Still exactly 1
 }
@@ -1576,7 +1586,7 @@ TEST("SoulLink: KILL_MON transfers PC-stored Pokemon to Graveyard box and zeroes
     cmd.executionStatus = SOULLINK_CMD_STATUS_PENDING;
 
     EXPECT_EQ(SoulLink_ReceiveCommand(&cmd), TRUE);
-    SoulLink_ProcessOverworldCommands();
+    DrainSoulLinkCommands();
 
     // Verify command succeeded
     EXPECT_EQ(gSoulLink.cmdQueue[0].executionStatus, SOULLINK_CMD_STATUS_SUCCESS);
@@ -1643,7 +1653,7 @@ TEST("SoulLink: Gym progression unlocks locally in solo play, but strictly requi
 
     SoulLink_TestSetSafeOverworldOverride(TRUE, TRUE);
     EXPECT_EQ(SoulLink_ReceiveCommand(&cmd), TRUE);
-    SoulLink_ProcessOverworldCommands();
+    DrainSoulLinkCommands();
 
     EXPECT_EQ(gSoulLink.cmdQueue[0].executionStatus, SOULLINK_CMD_STATUS_SUCCESS);
     EXPECT_EQ(gSoulLink.unlockedGymStage, 3);
@@ -1690,7 +1700,7 @@ TEST("SoulLink: KILL_MON defers execution when Graveyard box is full without del
     cmd.executionStatus = SOULLINK_CMD_STATUS_PENDING;
 
     EXPECT_EQ(SoulLink_ReceiveCommand(&cmd), TRUE);
-    SoulLink_ProcessOverworldCommands();
+    DrainSoulLinkCommands();
 
     // Must be DEFERRED: cannot safely complete Graveyard transfer!
     EXPECT_EQ(gSoulLink.cmdQueue[0].executionStatus, SOULLINK_CMD_STATUS_DEFERRED);
@@ -1773,7 +1783,7 @@ TEST("SoulLink: Out-of-order execution allows older DEFERRED command to execute 
     cmd1.executionStatus = SOULLINK_CMD_STATUS_PENDING;
 
     EXPECT_EQ(SoulLink_ReceiveCommand(&cmd1), TRUE);
-    SoulLink_ProcessOverworldCommands();
+    DrainSoulLinkCommands();
 
     // Command 1 must be DEFERRED, lastExecutedCmdSequenceId must remain 0
     EXPECT_EQ(gSoulLink.cmdQueue[0].executionStatus, SOULLINK_CMD_STATUS_DEFERRED);
@@ -1790,7 +1800,7 @@ TEST("SoulLink: Out-of-order execution allows older DEFERRED command to execute 
     cmd2.executionStatus = SOULLINK_CMD_STATUS_PENDING;
 
     EXPECT_EQ(SoulLink_ReceiveCommand(&cmd2), TRUE);
-    SoulLink_ProcessOverworldCommands();
+    DrainSoulLinkCommands();
 
     // Command 2 succeeded, advancing lastExecutedCmdSequenceId to 2
     EXPECT_EQ(gSoulLink.cmdQueue[1].executionStatus, SOULLINK_CMD_STATUS_SUCCESS);
@@ -1807,7 +1817,7 @@ TEST("SoulLink: Out-of-order execution allows older DEFERRED command to execute 
     cmdRetry.executionStatus = SOULLINK_CMD_STATUS_PENDING;
 
     EXPECT_EQ(SoulLink_ReceiveCommand(&cmdRetry), TRUE);
-    SoulLink_ProcessOverworldCommands();
+    DrainSoulLinkCommands();
 
     // Command 1 MUST execute successfully, NOT be falsely classified as DUPLICATE!
     EXPECT_EQ(gSoulLink.cmdQueue[2].executionStatus, SOULLINK_CMD_STATUS_SUCCESS);
@@ -1824,7 +1834,7 @@ TEST("SoulLink: Out-of-order execution allows older DEFERRED command to execute 
     cmdDup.executionStatus = SOULLINK_CMD_STATUS_PENDING;
 
     EXPECT_EQ(SoulLink_ReceiveCommand(&cmdDup), TRUE);
-    SoulLink_ProcessOverworldCommands();
+    DrainSoulLinkCommands();
 
     EXPECT_EQ(gSoulLink.cmdQueue[3].executionStatus, SOULLINK_CMD_STATUS_DUPLICATE);
     EXPECT_EQ(CountMonsInBox(SOULLINK_GRAVEYARD_BOX), 1); // No extra transfers
@@ -1837,7 +1847,7 @@ TEST("SoulLink: Out-of-order execution allows older DEFERRED command to execute 
     cmdDup.executionStatus = SOULLINK_CMD_STATUS_PENDING;
 
     EXPECT_EQ(SoulLink_ReceiveCommand(&cmdDup), TRUE);
-    SoulLink_ProcessOverworldCommands();
+    DrainSoulLinkCommands();
 
     EXPECT_EQ(gSoulLink.cmdQueue[4].executionStatus, SOULLINK_CMD_STATUS_DUPLICATE);
 

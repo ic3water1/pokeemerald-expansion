@@ -9,6 +9,7 @@
 const volatile struct SoulLinkRunProfile gSoulLinkRunProfile = {
     .marker = "SL_PROFILE_V1",
 };
+const volatile u8 gSoulLinkRunFenceBuild[16] = "SL_RUN_FENCE_V2";
 static EWRAM_DATA u8 sRunStatus = SOULLINK_RUN_SOLO;
 STATIC_ASSERT(sizeof(struct SoulLinkRunIdentity) == 44, SoulLinkRunIdentityWireSize);
 STATIC_ASSERT(sizeof(struct SoulLinkRunSave) == 56, SoulLinkRunSaveWireSize);
@@ -48,8 +49,14 @@ bool8 SoulLinkRun_Validate(const struct SoulLinkRunIdentity *id)
         && !IsZero(id->participantId, sizeof(id->participantId));
 }
 
+#if TESTING
+u32 gSoulLinkTestSaveCrcCount;
+#endif
 static u32 SaveChecksum(void)
 {
+#if TESTING
+    gSoulLinkTestSaveCrcCount++;
+#endif
     return SoulLinkRun_Crc32(gSaveBlock3Ptr, offsetof(struct SaveBlock3, runIntegrity.checksum));
 }
 
@@ -109,7 +116,7 @@ bool8 SoulLinkRun_PrepareSave(void)
 {
     if (sRunStatus == SOULLINK_RUN_SOLO)
         return TRUE;
-    if (sRunStatus != SOULLINK_RUN_AUTHORIZED)
+    if (!SoulLinkRun_CanProgress())
         return FALSE;
     gSaveBlock3Ptr->runIntegrity.checksum = SaveChecksum();
     return TRUE;
@@ -117,7 +124,31 @@ bool8 SoulLinkRun_PrepareSave(void)
 
 bool8 SoulLinkRun_CanProgress(void)
 {
-    return sRunStatus == SOULLINK_RUN_SOLO || sRunStatus == SOULLINK_RUN_AUTHORIZED;
+    if (sRunStatus != SOULLINK_RUN_SOLO && gSoulLink.criticalOverflowCount != 0)
+    {
+        SoulLinkRun_SetStatus(SOULLINK_RUN_CORRUPT);
+        return FALSE;
+    }
+    if (sRunStatus == SOULLINK_RUN_SOLO && gSoulLinkRunProfile.identity.magic != 0)
+    {
+        SoulLinkRun_SetStatus(SOULLINK_RUN_RECONCILE);
+        return FALSE;
+    }
+    // Emulator states include mutable authorization and identity RAM. Bind every
+    // progression check to this ROM's immutable profile before honoring either.
+    if ((sRunStatus == SOULLINK_RUN_SOLO || sRunStatus == SOULLINK_RUN_AUTHORIZED)
+     && memcmp((const void *)&gSoulLinkRunProfile.identity,
+               &gSaveBlock3Ptr->runIntegrity.identity, sizeof(struct SoulLinkRunIdentity)) != 0)
+    {
+        SoulLinkRun_SetStatus(SOULLINK_RUN_FOREIGN);
+        return FALSE;
+    }
+    // The external adapter may revoke a grant, but cannot create one by writing
+    // the mirror byte. Outstanding irreversible events also fence progression.
+    if (sRunStatus == SOULLINK_RUN_AUTHORIZED && gSoulLink.runStatus != SOULLINK_RUN_AUTHORIZED)
+        SoulLinkRun_Lock();
+    return sRunStatus == SOULLINK_RUN_SOLO || (sRunStatus == SOULLINK_RUN_AUTHORIZED
+        && gSoulLink.eventHead == gSoulLink.eventTail);
 }
 
 u8 SoulLinkRun_GetStatus(void) { return sRunStatus; }
@@ -127,14 +158,27 @@ void SoulLinkRun_Lock(void)
         SoulLinkRun_SetStatus(SOULLINK_RUN_RECONCILE);
 }
 
-bool8 SoulLinkRun_ConfirmApplied(const struct SoulLinkRunIdentity *identity, u32 revision)
+bool8 SoulLinkRun_StageApplied(const struct SoulLinkRunIdentity *identity, u32 revision)
 {
-    if (sRunStatus != SOULLINK_RUN_RECONCILE || !SoulLinkRun_Validate(identity)
+    if (gSoulLink.criticalOverflowCount != 0)
+    {
+        SoulLinkRun_SetStatus(SOULLINK_RUN_CORRUPT);
+        return FALSE;
+    }
+    if (gSoulLinkRunFenceBuild[0] != 'S' || sRunStatus != SOULLINK_RUN_RECONCILE || !SoulLinkRun_Validate(identity)
+     || memcmp(identity, (const void *)&gSoulLinkRunProfile.identity, sizeof(*identity)) != 0
      || memcmp(identity, &gSaveBlock3Ptr->runIntegrity.identity, sizeof(*identity)) != 0
      || revision < gSaveBlock3Ptr->runIntegrity.authoritativeRevision)
         return FALSE;
     // Call only after the bridge authenticates, applies authoritative plan and waits for native enforcement.
     gSaveBlock3Ptr->runIntegrity.authoritativeRevision = revision;
+    return TRUE;
+}
+
+bool8 SoulLinkRun_ConfirmApplied(const struct SoulLinkRunIdentity *identity, u32 revision)
+{
+    if (!SoulLinkRun_StageApplied(identity, revision))
+        return FALSE;
     SoulLinkRun_SetStatus(SOULLINK_RUN_AUTHORIZED);
     return TRUE;
 }

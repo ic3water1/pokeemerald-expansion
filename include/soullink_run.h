@@ -21,5 +21,6 @@ u8 SoulLinkRun_GetStatus(void);
 void SoulLinkRun_SetStatus(u8 status);
 // Trusted adapter integration must lock on every disconnect/reset/save-state load BEFORE resuming the core.
 void SoulLinkRun_Lock(void);
+bool8 SoulLinkRun_StageApplied(const struct SoulLinkRunIdentity *identity, u32 revision);
 bool8 SoulLinkRun_ConfirmApplied(const struct SoulLinkRunIdentity *identity, u32 revision);
 #endif
