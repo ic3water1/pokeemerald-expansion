@@ -8368,7 +8368,8 @@ static void Cmd_givecaughtmon(void)
                 break;
         }
 
-        if (GiveCapturedMonToPlayer(caughtMon) != MON_GIVEN_TO_PARTY
+        u8 placement = GiveCapturedMonToPlayer(caughtMon);
+        if (placement != MON_GIVEN_TO_PARTY
          && gBattleCommunication[MULTISTRING_CHOOSER] != B_MSG_SWAPPED_INTO_PARTY)
         {
             if (!ShouldShowBoxWasFullMessage())
@@ -8394,7 +8395,10 @@ static void Cmd_givecaughtmon(void)
         if (emptySlot != PARTY_SIZE)
             gBattleStruct->partyState[B_SIDE_PLAYER][emptySlot].changedSpecies = GetBattlerPartyState(GetCatchingBattler())->changedSpecies;
 
-        gBattleResults.caughtMonSpecies = GetMonData(caughtMon, MON_DATA_SPECIES);
+        // Battle cleanup clears the enemy party before the end callback.
+        // Keep only a successfully placed capture in the native results record.
+        gBattleResults.caughtMonSpecies = (placement == MON_GIVEN_TO_PARTY || placement == MON_GIVEN_TO_PC)
+            ? GetMonData(caughtMon, MON_DATA_SPECIES) : SPECIES_NONE;
         GetMonData(caughtMon, MON_DATA_NICKNAME, gBattleResults.caughtMonNick);
         gBattleResults.caughtMonBall = GetMonData(caughtMon, MON_DATA_POKEBALL);
 

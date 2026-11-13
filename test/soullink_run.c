@@ -335,3 +335,31 @@ TEST("RunProfile: lost critical capture cannot be hidden by an empty queue or a 
     EXPECT_EQ(SoulLinkRun_GetStatus(),SOULLINK_RUN_CORRUPT);
     EXPECT_EQ(TrySavingData(SAVE_NORMAL),SAVE_STATUS_ERROR);
 }
+
+TEST("RunProfile: terminal authority command cannot be turned into a new grant or save")
+{
+    struct SoulLinkRunIdentity id;
+    struct SoulLinkCommand cmd = {.sequenceId = 1, .cmdType = SOULLINK_CMD_BEGIN_END_RUN};
+    memcpy(&id, (const void *)&gSoulLinkRunProfile.identity, sizeof(id));
+    ASSUME(id.saveVersion == 2 && SoulLinkRun_Validate(&id));
+    SoulLink_Init();ClearSav3();
+    SoulLinkRun_OnLoad(SAVE_STATUS_EMPTY);SoulLinkRun_OnNewGame();
+    gSoulLink.transportState = SOULLINK_TRANSPORT_CONNECTED;
+    SoulLink_TestSetSafeOverworldOverride(TRUE, TRUE);
+    EXPECT(SoulLink_ReceiveCommand(&cmd));SoulLink_ProcessOverworldCommands();
+    EXPECT_EQ(gSoulLink.cmdQueue[0].executionStatus, SOULLINK_CMD_STATUS_SUCCESS);
+    EXPECT_EQ(SoulLinkRun_GetStatus(), SOULLINK_RUN_ENDING);
+    EXPECT(!SoulLinkRun_CanProgress());
+    EXPECT(!SoulLinkRun_PrepareSave());
+    cmd.sequenceId = 2;cmd.cmdType = SOULLINK_CMD_END_RUN;
+    EXPECT(SoulLink_ReceiveCommand(&cmd));SoulLink_ProcessOverworldCommands();
+    EXPECT_EQ(gSoulLink.cmdQueue[1].executionStatus, SOULLINK_CMD_STATUS_SUCCESS);
+    EXPECT_EQ(SoulLinkRun_GetStatus(), SOULLINK_RUN_ENDED);
+    gSoulLink.runStatus = SOULLINK_RUN_AUTHORIZED;
+    EXPECT(!SoulLinkRun_CanProgress());
+    EXPECT(!SoulLinkRun_ConfirmApplied(&id, 0));
+    EXPECT(!SoulLinkRun_PrepareSave());
+    EXPECT_EQ(TrySavingData(SAVE_NORMAL), SAVE_STATUS_ERROR);
+    SoulLink_TestSetSafeOverworldOverride(FALSE, FALSE);
+    SoulLink_Init();
+}

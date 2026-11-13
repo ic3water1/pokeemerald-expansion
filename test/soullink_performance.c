@@ -51,6 +51,7 @@ TEST("SoulLinkPerf: one eight and sixteen death commands keep each iteration bel
         Test_MgbaPrintf("REPAIRPERF:kill-count-%d-max:%d:1024:total:%d:iterations:%d",counts[count],max,total,iterations);
         EXPECT_LT(max,65); // 65 ticks = 3.967 ms.
         EXPECT_EQ(gSoulLink.lastExecutedCmdSequenceId,counts[count]);
+        EXPECT(iterations <= 38 * counts[count]);
     }
     SoulLink_TestSetSafeOverworldOverride(FALSE,FALSE);
 }
@@ -101,4 +102,104 @@ TEST("SoulLinkPerf: native icon animation and four selected faces preserve compl
     EXPECT(SoulLink_TestFaceVram(&highWater));
     EXPECT(highWater <= 56);
     Test_MgbaPrintf("REPAIRPERF:sprite-copy-high-water:%d:64",highWater);
+}
+
+TEST("SoulLinkPerf: six targeted party members stay bounded with empty and full Graveyard")
+{
+    u32 full, i, iterations, ticks, max = 0;
+    u8 location = 16;
+    struct BoxPokemon filler;
+    for (full = 0; full < 2; full++)
+    {
+        struct SoulLinkCommand cmd = {.sequenceId = 1, .cmdType = SOULLINK_CMD_KILL_MON, .targetMapSec = 16};
+        SetupPerfPC(TRUE);
+        for (i = 0; i < PARTY_SIZE; i++)
+        {
+            CreateMon(&gParties[B_TRAINER_PLAYER][i], SPECIES_TREECKO, 10, 0, OTID_STRUCT_PRESET(0));
+            SetMonData(&gParties[B_TRAINER_PLAYER][i], MON_DATA_MET_LOCATION, &location);
+        }
+        if (full)
+        {
+            CreateBoxMon(&filler, SPECIES_TREECKO, 10, 0, OTID_STRUCT_PRESET(0));
+            for (i = 0; i < IN_BOX_COUNT; i++) SetBoxMonAt(SOULLINK_GRAVEYARD_BOX, i, &filler);
+        }
+        EXPECT(SoulLink_ReceiveCommand(&cmd));
+        iterations = 0;
+        do
+        {
+            StartPerf(); SoulLink_ProcessOverworldCommands(); ticks = StopPerf();
+            if (ticks > max) max = ticks;
+            EXPECT(++iterations < 128);
+        } while (SoulLink_GetPendingCommandCount());
+        EXPECT_EQ(gSoulLink.cmdQueue[0].executionStatus, full ? SOULLINK_CMD_STATUS_DEFERRED : SOULLINK_CMD_STATUS_SUCCESS);
+        if (full)
+            for (i = 0; i < PARTY_SIZE; i++) EXPECT(gParties[B_TRAINER_PLAYER][i].box.isDead);
+        else
+            for (i = 0; i < PARTY_SIZE; i++) EXPECT(GetBoxedMonPtr(SOULLINK_GRAVEYARD_BOX, i)->isDead);
+    }
+    EXPECT_LT(max, 65);
+    Test_MgbaPrintf("ACCEPTPERF:party-six-max:%d:1024", max);
+    SoulLink_TestSetSafeOverworldOverride(FALSE, FALSE);
+}
+
+TEST("SoulLink: interrupted death scan restarts after storage moves a target behind its cursor")
+{
+    struct BoxPokemon target;
+    struct SoulLinkCommand cmd = {.sequenceId = 1, .cmdType = SOULLINK_CMD_KILL_MON, .targetMapSec = 16};
+    u8 location = 16;
+    u32 i;
+    SetupPerfPC(FALSE);
+    CreateBoxMon(&target, SPECIES_TREECKO, 10, 0, OTID_STRUCT_PRESET(0));
+    SetBoxMonData(&target, MON_DATA_MET_LOCATION, &location);
+    SetBoxMonAt(1, 0, &target);
+    EXPECT(SoulLink_ReceiveCommand(&cmd));
+    for (i = 0; i < 4; i++) SoulLink_ProcessOverworldCommands();
+    EXPECT_EQ(gSoulLink.cmdTail, 0);
+    EXPECT_EQ(gSoulLink.cmdQueue[0].executionStatus, SOULLINK_CMD_STATUS_PENDING);
+    // A menu/storage transition can move a live target into an already scanned slot.
+    SetBoxMonAt(0, 0, &target); ZeroBoxMonAt(1, 0);
+    SoulLink_TestSetSafeOverworldOverride(TRUE, FALSE);
+    SoulLink_ProcessOverworldCommands();
+    EXPECT_EQ(gSoulLink.cmdTail, 0);
+    SoulLink_TestSetSafeOverworldOverride(TRUE, TRUE);
+    for (i = 0; i < 128 && SoulLink_GetPendingCommandCount(); i++) SoulLink_ProcessOverworldCommands();
+    EXPECT_EQ(gSoulLink.cmdQueue[0].executionStatus, SOULLINK_CMD_STATUS_SUCCESS);
+    EXPECT_EQ(gSoulLink.cmdTail, 1);
+    EXPECT_EQ(GetBoxMonDataAt(0, 0, MON_DATA_SPECIES), SPECIES_NONE);
+    EXPECT(GetBoxedMonPtr(SOULLINK_GRAVEYARD_BOX, 0)->isDead);
+    SoulLink_TestSetSafeOverworldOverride(FALSE, FALSE);
+}
+
+TEST("SoulLink: reconciliation of an already enforced death does not emit another wipe")
+{
+    struct SoulLinkCommand cmd = {.sequenceId = 1, .cmdType = SOULLINK_CMD_KILL_MON, .targetMapSec = 16};
+    u8 location = 16;
+    u16 events;
+    u32 i, retained;
+    for (retained = 0; retained < 2; retained++)
+    {
+        SetupPerfPC(FALSE);
+        cmd.sequenceId = 1;
+        gParties[B_TRAINER_PLAYER][0].box.isDead = retained;
+        SetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_MET_LOCATION, &location);
+        EXPECT(SoulLink_ReceiveCommand(&cmd));
+        for (i = 0; i < 3; i++) SoulLink_ProcessOverworldCommands();
+        EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_SPECIES), SPECIES_NONE);
+        // A safe-point interruption must retain the first wipe decision, while
+        // restarting the physical scan for any storage changes behind its cursor.
+        SoulLink_TestSetSafeOverworldOverride(TRUE, FALSE);
+        SoulLink_ProcessOverworldCommands();
+        SoulLink_TestSetSafeOverworldOverride(TRUE, TRUE);
+        for (i = 0; i < 128 && SoulLink_GetPendingCommandCount(); i++) SoulLink_ProcessOverworldCommands();
+        EXPECT_EQ(gSoulLink.cmdQueue[0].executionStatus, SOULLINK_CMD_STATUS_SUCCESS);
+        events = gSoulLink.eventHead;
+        EXPECT_EQ(events, 1);
+        EXPECT_EQ(gSoulLink.eventQueue[0].eventType, SOULLINK_EVENT_WIPE);
+        cmd.sequenceId = 2;
+        EXPECT(SoulLink_ReceiveCommand(&cmd));
+        for (i = 0; i < 128 && SoulLink_GetPendingCommandCount(); i++) SoulLink_ProcessOverworldCommands();
+        EXPECT_EQ(gSoulLink.cmdQueue[1].executionStatus, SOULLINK_CMD_STATUS_SUCCESS);
+        EXPECT_EQ(gSoulLink.eventHead, events);
+        SoulLink_TestSetSafeOverworldOverride(FALSE, FALSE);
+    }
 }

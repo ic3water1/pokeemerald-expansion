@@ -300,6 +300,8 @@ static void AsciiToPokemonString(u8 *dest, const u8 *asciiSrc, u32 maxChars)
             dest[i] = CHAR_PERIOD;
         else if (c == '/')
             dest[i] = CHAR_SLASH;
+        else if (c == '\n')
+            dest[i] = CHAR_NEWLINE;
         else
             dest[i] = CHAR_QUESTION_MARK;
     }
@@ -1032,6 +1034,17 @@ static void RenderLobbyScreen(void)
 
 static void RenderErrorScreen(void)
 {
+    if (SoulLinkRun_GetStatus() == SOULLINK_RUN_ENDED)
+    {
+        RenderHeader(COMPOUND_STRING("RUN ENDED"));
+        FillWindowPixelBuffer(WIN_BODY, PIXEL_FILL(1));
+        AddTextPrinterParameterized(WIN_BODY, FONT_NORMAL,
+            COMPOUND_STRING("This run has ended.\nClose this emulator.\nUse adapter for a new run."),
+            8, 12, TEXT_SKIP_DRAW, NULL);
+        CopyWindowToVram(WIN_BODY, COPYWIN_FULL);
+        RenderFooter(COMPOUND_STRING("RUN LOCKED"));
+        return;
+    }
     RenderHeader(COMPOUND_STRING("{COLOR RED}SOUL LINK ERROR"));
 
     FillWindowPixelBuffer(WIN_BODY, PIXEL_FILL(1));
@@ -1097,6 +1110,16 @@ static void Task_SoulLinkMenu_Main(u8 taskId)
 {
     if (gPaletteFade.active)
         return;
+
+    if (SoulLinkRun_GetStatus() == SOULLINK_RUN_ENDED)
+    {
+        if (sScreen != SOULLINK_SCREEN_ERROR)
+        {
+            sScreen = SOULLINK_SCREEN_ERROR;
+            RenderCurrentScreen();
+        }
+        return;
+    }
 
     // Handle scene exit transition
     if (sScreen == SOULLINK_SCREEN_EXITING)
@@ -1191,7 +1214,7 @@ static void Task_SoulLinkMenu_Main(u8 taskId)
                 if ((sMenuCursor == SOULLINK_OPTION_HOST || sMenuCursor == SOULLINK_OPTION_JOIN)
                  && runStatus != SOULLINK_RUN_SOLO)
                 {
-                    SetErrorMessage((const u8 *)"PROFILE ALREADY ASSIGNED\nUse Reconnect for this run.\nCreate fresh Host/Join profiles\nwith the external launcher.");
+                    SetErrorMessage((const u8 *)"PROFILE ALREADY ASSIGNED\nUse Reconnect for this run.\nCreate fresh Host/Join profiles\nwith the adapter profile selector.");
                     sPrevScreen = SOULLINK_SCREEN_MAIN;
                     sScreen = SOULLINK_SCREEN_ERROR;
                     RenderCurrentScreen();
@@ -1214,18 +1237,20 @@ static void Task_SoulLinkMenu_Main(u8 taskId)
                     RenderCurrentScreen();
                     break;
                 }
-#if !SOULLINK_DEV_TEST
-                if (runStatus == SOULLINK_RUN_SOLO)
-                {
-                    SetErrorMessage((const u8 *)"MULTIPLAYER RUN REQUIRED\nSolo saves cannot become multiplayer.\nUse profile launcher to create a\nnew isolated multiplayer run profile.");
-                    sPrevScreen = SOULLINK_SCREEN_MAIN;
-                    sScreen = SOULLINK_SCREEN_ERROR;
-                    RenderCurrentScreen();
-                    break;
-                }
-#endif
+
             }
 
+#if !SOULLINK_DEV_TEST
+            if (runStatus == SOULLINK_RUN_SOLO && sMenuCursor != SOULLINK_OPTION_EXIT
+             && !(gSoulLink.mailboxFlags & SOULLINK_FLAG_MANAGED_ADAPTER))
+            {
+                SetErrorMessage((const u8 *)"ACTIVATE SOUL LINK ADAPTER\nOpen the adapter's lobby ROM.\nSolo progress is never imported.");
+                sPrevScreen = SOULLINK_SCREEN_MAIN;
+                sScreen = SOULLINK_SCREEN_ERROR;
+                RenderCurrentScreen();
+                break;
+            }
+#endif
             switch (sMenuCursor)
             {
             case SOULLINK_OPTION_HOST:

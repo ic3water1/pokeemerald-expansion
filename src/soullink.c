@@ -1,11 +1,13 @@
 #include "soullink.h"
 #include "soullink_run.h"
+#include "soullink_menu.h"
 
 #if __has_include("global.h")
 #include "global.h"
 #include "main.h"
 #include "overworld.h"
 #include "battle.h"
+#include "battle_setup.h"
 #include "battle_util.h"
 #include "follower_npc.h"
 #include "script_pokemon_util.h"
@@ -19,6 +21,7 @@
 #include "load_save.h"
 #include "save.h"
 #include "constants/species.h"
+#include "constants/flags.h"
 #else
 struct MapHeader {
     u8 regionMapSectionId;
@@ -39,6 +42,8 @@ static void RunDevIntegrityAction(void)
     switch (gSoulLinkDevIntegrityAction)
     {
     case 1:
+        // Supplemental developer fixture explicitly models post-handoff eligibility.
+        FlagSet(FLAG_ADVENTURE_STARTED);
         mapSec = gMapHeader.regionMapSectionId;
         gMapHeader.regionMapSectionId = MAPSEC_ROUTE_103;
         gSoulLink.routeState[MAPSEC_ROUTE_103] = ROUTE_STATE_OPEN;
@@ -76,6 +81,43 @@ static u16 sNextEventSequenceId;
 static u16 sNextCmdSequenceId;
 static u16 sNextLobbyRequestId;
 static u8 sFaintedPartyMask;
+static EWRAM_DATA struct {
+    u16 cursor;
+    bool8 pending;
+    bool8 reported;
+} sWipeWork;
+
+bool8 SoulLink_IsWipeCheckPending(void) { return sWipeWork.pending; }
+void SoulLink_QueueWipeCheck(void) { sWipeWork.cursor = 0; sWipeWork.pending = TRUE; }
+static void EmitTrueWipe(u8 route)
+{
+    sWipeWork.pending = FALSE;
+    if (SoulLinkRun_GetStatus() == SOULLINK_RUN_ENDING || SoulLinkRun_GetStatus() == SOULLINK_RUN_ENDED)
+        return;
+    if (!sWipeWork.reported)
+    {
+        sWipeWork.reported = TRUE;
+        SoulLink_EmitEvent(SOULLINK_EVENT_WIPE, route, 0, 0, 0);
+    }
+}
+static void StepWipeCheck(void)
+{
+    u32 n;
+    if (!sWipeWork.pending || SoulLinkRun_GetStatus() == SOULLINK_RUN_ENDED || SoulLinkRun_GetStatus() == SOULLINK_RUN_ENDING) return;
+    if (!SoulLink_IsPartyWiped()) { sWipeWork.pending = FALSE; return; }
+    // Unavailable storage is unknown, never evidence of a true global wipe.
+    if (gPokemonStoragePtr == NULL) return;
+    for (n = 0; n < 12 && sWipeWork.cursor < TOTAL_BOXES_COUNT * IN_BOX_COUNT; n++)
+    {
+        u16 slot = sWipeWork.cursor++;
+        struct BoxPokemon *mon;
+        if (slot / IN_BOX_COUNT == SOULLINK_GRAVEYARD_BOX) continue;
+        mon = GetBoxedMonPtr(slot / IN_BOX_COUNT, slot % IN_BOX_COUNT);
+        if (mon->hasSpecies && !mon->isDead && !GetBoxMonData(mon, MON_DATA_IS_EGG) && !mon->isBadEgg)
+        { sWipeWork.pending = FALSE; return; }
+    }
+    if (sWipeWork.cursor >= TOTAL_BOXES_COUNT * IN_BOX_COUNT) EmitTrueWipe(0);
+}
 static void ResetKillWork(void);
 
 static u16 sDeferredCmdSeqs[SOULLINK_CMD_QUEUE_SIZE];
@@ -106,6 +148,7 @@ static const u8 sGymLevelCaps[] = {
  */
 void SoulLink_Init(void)
 {
+    memset(&sWipeWork, 0, sizeof(sWipeWork));
     ResetKillWork();
     u32 i;
     u32 p;
@@ -197,6 +240,7 @@ void SoulLink_Init(void)
  */
 void SoulLink_NewGame(void)
 {
+    memset(&sWipeWork, 0, sizeof(sWipeWork));
     u32 i, p;
 
     gSoulLink.unlockedGymStage = 0;
@@ -458,6 +502,7 @@ void SoulLink_EmitEvent(u8 eventType, u8 mapSec, u16 species, u8 primaryType, u8
 
     if (eventType == SOULLINK_EVENT_FAINTED
      || eventType == SOULLINK_EVENT_MISSED
+     || eventType == SOULLINK_EVENT_STARTER_ACQUIRED
      || eventType == SOULLINK_EVENT_WIPE
      || eventType == SOULLINK_EVENT_CAUGHT
      || eventType == SOULLINK_EVENT_BADGE)
@@ -497,7 +542,7 @@ u16 SoulLink_GetEncounterId(void)
 u16 SoulLink_GetEncounterIdForMon(struct Pokemon *mon)
 {
 #if __has_include("global.h")
-    u8 metLoc = (u8)GetMonData(mon, MON_DATA_MET_LOCATION);
+    u8 metLoc = (u8)GetMonData(mon, MON_DATA_SOULLINK_LINK_ID);
     return metLoc;
 #else
     return 0;
@@ -510,6 +555,10 @@ u16 SoulLink_GetEncounterIdForMon(struct Pokemon *mon)
  */
 bool8 SoulLink_CanCatchOnCurrentMap(void)
 {
+    // Set by the initial Poké Ball story handoff, never by current inventory.
+    if (!FlagGet(FLAG_ADVENTURE_STARTED))
+        return FALSE;
+
     if (!SoulLinkRun_CanProgress())
     {
         return FALSE;
@@ -532,6 +581,10 @@ bool8 SoulLink_CanCatchOnCurrentMap(void)
  */
 void SoulLink_OnWildBattleStart(void)
 {
+    // Set by the initial Poké Ball story handoff, never by current inventory.
+    if (!FlagGet(FLAG_ADVENTURE_STARTED))
+        return;
+
     if (!SoulLinkRun_CanProgress())
     {
         return;
@@ -548,8 +601,22 @@ void SoulLink_OnWildBattleStart(void)
 /**
  * Called when the player successfully catches a wild Pokémon.
  */
+void SoulLink_OnWildCaptureComplete(void)
+{
+    // Native capture results are reset at battle initialization and survive
+    // enemy-party cleanup. They cover both Party and PC placement.
+    if (gBattleOutcome == B_OUTCOME_CAUGHT)
+        SoulLink_OnWildCatchSuccess(gBattleResults.caughtMonSpecies);
+}
+
 void SoulLink_OnWildCatchSuccess(u16 species)
 {
+    if (species == SPECIES_NONE || species >= NUM_SPECIES)
+        return;
+    // Set by the initial Poké Ball story handoff, never by current inventory.
+    if (!FlagGet(FLAG_ADVENTURE_STARTED))
+        return;
+
     u16 encounterId = SoulLink_GetEncounterId();
     u8 primaryType = 0;
 
@@ -579,6 +646,10 @@ void SoulLink_OnWildCatchSuccess(u16 species)
  */
 void SoulLink_OnWildEncounterFailed(void)
 {
+    // Set by the initial Poké Ball story handoff, never by current inventory.
+    if (!FlagGet(FLAG_ADVENTURE_STARTED))
+        return;
+
     u16 encounterId = SoulLink_GetEncounterId();
 
     if (encounterId < NUM_MAPSECS && gSoulLink.routeState[encounterId] == ROUTE_STATE_ENCOUNTER_ACTIVE)
@@ -641,6 +712,7 @@ void SoulLink_ProcessFaintedMonsPostBattle(void)
 #if __has_include("global.h")
     s32 i;
     bool8 anyMoved = FALSE;
+    bool8 anyFainted = FALSE;
 
     for (i = (s32)PARTY_SIZE - 1; i >= 0; i--)
     {
@@ -659,6 +731,7 @@ void SoulLink_ProcessFaintedMonsPostBattle(void)
         if (hp > 0 && !didFaintInBattle)
             continue;
 
+        anyFainted = TRUE;
         encounterId = SoulLink_GetEncounterIdForMon(mon);
         primaryType = (species < NUM_SPECIES) ? gSpeciesInfo[species].types[0] : 0;
 
@@ -708,6 +781,7 @@ void SoulLink_ProcessFaintedMonsPostBattle(void)
         CompactPartySlots();
     }
 
+    if (anyFainted && gSoulLinkRunProfile.identity.saveVersion == 2) SoulLink_QueueWipeCheck();
     sFaintedPartyMask = 0;
 #endif
 }
@@ -769,7 +843,7 @@ bool8 SoulLink_IsPartyWiped(void)
     {
         u16 species = GetMonData(&gParties[B_TRAINER_PLAYER][i], MON_DATA_SPECIES);
         u16 hp = GetMonData(&gParties[B_TRAINER_PLAYER][i], MON_DATA_HP);
-        if (species != SPECIES_NONE && hp > 0 && !gParties[B_TRAINER_PLAYER][i].box.isDead)
+        if (species != SPECIES_NONE && hp > 0 && !gParties[B_TRAINER_PLAYER][i].box.isDead && !GetMonData(&gParties[B_TRAINER_PLAYER][i], MON_DATA_IS_EGG))
         {
             return FALSE;
         }
@@ -792,7 +866,7 @@ u8 SoulLink_GetLivingPokemonCount(void)
     {
         u16 species = GetMonData(&gParties[B_TRAINER_PLAYER][i], MON_DATA_SPECIES);
         u16 hp = GetMonData(&gParties[B_TRAINER_PLAYER][i], MON_DATA_HP);
-        if (species != SPECIES_NONE && hp > 0 && !gParties[B_TRAINER_PLAYER][i].box.isDead)
+        if (species != SPECIES_NONE && hp > 0 && !gParties[B_TRAINER_PLAYER][i].box.isDead && !GetMonData(&gParties[B_TRAINER_PLAYER][i], MON_DATA_IS_EGG))
         {
             count++;
         }
@@ -1043,6 +1117,10 @@ bool8 SoulLink_IsSafeOverworldState(void)
     // retains trainer battle flags even after safely returning to the overworld.
     // The true runtime overworld state is verified by ensuring the active main callback
     // is CB2_Overworld, without screen fades, active scripts, or locked controls.
+    // This native callback owns a stopped starter chooser, before any battle
+    // transition begins. Script/field locks deliberately remain held there.
+    if (BattleSetup_IsStarterAuthorityBoundary())
+        return TRUE;
     if (gMain.callback2 != CB2_Overworld)
         return FALSE;
     if (gPaletteFade.active)
@@ -1266,7 +1344,7 @@ u8 SoulLink_ApplyKillMon(u8 targetMapSec, u16 species)
                 if (boxSpecies == SPECIES_NONE || GetBoxMonDataAt(boxId, boxPos, MON_DATA_IS_EGG))
                     continue;
 
-                u8 metLoc = (u8)GetBoxMonDataAt(boxId, boxPos, MON_DATA_MET_LOCATION);
+                u8 metLoc = (u8)GetBoxMonDataAt(boxId, boxPos, MON_DATA_SOULLINK_LINK_ID);
                 if (metLoc == targetMapSec)
                 {
                     struct BoxPokemon *boxMon = GetBoxedMonPtr(boxId, boxPos);
@@ -1297,7 +1375,7 @@ u8 SoulLink_ApplyKillMon(u8 targetMapSec, u16 species)
     SoulLink_SaveToSaveBlock3();
 
     // 4. Check if party is completely wiped of living Pokémon
-    if (SoulLink_IsPartyWiped())
+    if (SoulLink_IsPartyWiped() && SoulLinkRun_GetStatus() != SOULLINK_RUN_ENDING && SoulLinkRun_GetStatus() != SOULLINK_RUN_ENDED)
     {
         if (SoulLink_GetLivingBoxPokemonCount() > 0)
         {
@@ -1307,7 +1385,7 @@ u8 SoulLink_ApplyKillMon(u8 targetMapSec, u16 species)
         }
         else
         {
-            SoulLink_EmitEvent(SOULLINK_EVENT_WIPE, targetMapSec, 0, 0, 0);
+            EmitTrueWipe(targetMapSec);
 #if !TESTING
             SetMainCallback2(CB2_WhiteOut);
 #endif
@@ -1382,16 +1460,50 @@ static EWRAM_DATA struct {
     bool8 deferred;
     bool8 partyMoved;
     bool8 livingBox;
+    bool8 partyAffected;
 } sKillWork = {0};
 
 static EWRAM_DATA u16 sPendingPlanToken = 0;
 
 static void ResetKillWork(void) { memset(&sKillWork, 0, sizeof(sKillWork)); }
 
+// A stale save before starter acquisition may not manufacture a second starter.
+// Verify actual persistent provenance, including retained/dead Graveyard entries,
+// before restoring the monotonic story receipt. Unknown storage stays deferred.
+static u8 StepVerifyStarter(const struct SoulLinkCommand *cmd)
+{
+    u32 n;
+    if (sKillWork.sequence != cmd->sequenceId)
+    {
+        memset(&sKillWork, 0, sizeof(sKillWork));sKillWork.sequence = cmd->sequenceId;
+    }
+    if (sKillWork.cursor < PARTY_SIZE)
+    {
+        for (n = 0; n < 2 && sKillWork.cursor < PARTY_SIZE; n++)
+        {
+            struct Pokemon *mon = &gParties[B_TRAINER_PLAYER][sKillWork.cursor++];
+            if (GetMonData(mon, MON_DATA_SPECIES) != SPECIES_NONE && GetMonData(mon, MON_DATA_SOULLINK_ACQUISITION) == 1)
+            { FlagSet(FLAG_SOULLINK_STARTER_ACQUIRED);sKillWork.sequence = 0;return SOULLINK_CMD_STATUS_SUCCESS; }
+        }
+        return SOULLINK_CMD_STATUS_PENDING;
+    }
+    if (!gPokemonStoragePtr) return SOULLINK_CMD_STATUS_DEFERRED;
+    for (n = 0; n < 12 && sKillWork.cursor < PARTY_SIZE + TOTAL_BOXES_COUNT * IN_BOX_COUNT; n++)
+    {
+        u16 slot = sKillWork.cursor++ - PARTY_SIZE;
+        struct BoxPokemon *mon = GetBoxedMonPtr(slot / IN_BOX_COUNT, slot % IN_BOX_COUNT);
+        if (mon->hasSpecies && GetBoxMonData(mon, MON_DATA_SOULLINK_ACQUISITION) == 1)
+        { FlagSet(FLAG_SOULLINK_STARTER_ACQUIRED);sKillWork.sequence = 0;return SOULLINK_CMD_STATUS_SUCCESS; }
+    }
+    if (sKillWork.cursor < PARTY_SIZE + TOTAL_BOXES_COUNT * IN_BOX_COUNT) return SOULLINK_CMD_STATUS_PENDING;
+    sKillWork.sequence = 0;
+    return SOULLINK_CMD_STATUS_REJECTED;
+}
+
 static u8 StepKillMon(const struct SoulLinkCommand *cmd)
 {
     u32 n;
-    if (cmd->targetMapSec >= NUM_MAPSECS)
+    if (cmd->cmdType == SOULLINK_CMD_KILL_STARTER ? cmd->targetMapSec != 255 : cmd->targetMapSec >= NUM_MAPSECS)
         return SOULLINK_CMD_STATUS_REJECTED;
     if (sKillWork.sequence != cmd->sequenceId)
     {
@@ -1399,34 +1511,38 @@ static u8 StepKillMon(const struct SoulLinkCommand *cmd)
         sKillWork.sequence = cmd->sequenceId;
         sKillWork.deferred = gPokemonStoragePtr == NULL;
     }
-    // One party member, or four PC entries per iteration. No whole-PC helper is
+    // Two party members, or twelve PC entries per iteration. No whole-PC helper is
     // called at completion, including the whiteout decision.
     if (sKillWork.cursor < PARTY_SIZE)
     {
-        u16 index = PARTY_SIZE - 1 - sKillWork.cursor++;
-        struct Pokemon *mon = &gParties[B_TRAINER_PLAYER][index];
-        if (GetMonData(mon, MON_DATA_SPECIES) != SPECIES_NONE
-         && !GetMonData(mon, MON_DATA_IS_EGG)
-         && SoulLink_GetEncounterIdForMon(mon) == cmd->targetMapSec)
+        for (n = 0; n < 2 && sKillWork.cursor < PARTY_SIZE; n++)
         {
-            u16 zero = 0;
-            s16 freeSpot = gPokemonStoragePtr ? FindGraveyardSpace() : -1;
-            mon->box.isDead = TRUE;
-            SetMonData(mon, MON_DATA_HP, &zero);
-            if (freeSpot >= 0)
+            u16 index = PARTY_SIZE - 1 - sKillWork.cursor++;
+            struct Pokemon *mon = &gParties[B_TRAINER_PLAYER][index];
+            if (GetMonData(mon, MON_DATA_SPECIES) != SPECIES_NONE
+             && !GetMonData(mon, MON_DATA_IS_EGG)
+             && SoulLink_GetEncounterIdForMon(mon) == cmd->targetMapSec)
             {
-                SetBoxMonAt(SOULLINK_GRAVEYARD_BOX, freeSpot, &mon->box);
-                ZeroMonData(mon);
-                sKillWork.partyMoved = TRUE;
+                u16 zero = 0;
+                s16 freeSpot = gPokemonStoragePtr ? FindGraveyardSpace() : -1;
+                sKillWork.partyAffected = TRUE;
+                mon->box.isDead = TRUE;
+                SetMonData(mon, MON_DATA_HP, &zero);
+                if (freeSpot >= 0)
+                {
+                    SetBoxMonAt(SOULLINK_GRAVEYARD_BOX, freeSpot, &mon->box);
+                    ZeroMonData(mon);
+                    sKillWork.partyMoved = TRUE;
+                }
+                else
+                    sKillWork.deferred = TRUE;
             }
-            else
-                sKillWork.deferred = TRUE;
+            if (sKillWork.cursor == PARTY_SIZE && sKillWork.partyMoved)
+                CompactPartySlots();
         }
-        if (sKillWork.cursor == PARTY_SIZE && sKillWork.partyMoved)
-            CompactPartySlots();
         return SOULLINK_CMD_STATUS_PENDING;
     }
-    for (n = 0; n < 4 && sKillWork.cursor < PARTY_SIZE + TOTAL_BOXES_COUNT * IN_BOX_COUNT; n++)
+    for (n = 0; n < 12 && sKillWork.cursor < PARTY_SIZE + TOTAL_BOXES_COUNT * IN_BOX_COUNT; n++)
     {
         u16 pc = sKillWork.cursor++ - PARTY_SIZE;
         struct BoxPokemon *mon;
@@ -1436,8 +1552,9 @@ static u8 StepKillMon(const struct SoulLinkCommand *cmd)
         // hasSpecies is a native header bit; decoding empty encrypted entries is needless.
         if (!mon->hasSpecies || GetBoxMonData(mon, MON_DATA_IS_EGG))
             continue;
-        if (GetBoxMonData(mon, MON_DATA_MET_LOCATION) == cmd->targetMapSec)
+        if (GetBoxMonData(mon, MON_DATA_SOULLINK_LINK_ID) == cmd->targetMapSec)
         {
+            sKillWork.partyAffected = TRUE;
             s16 freeSpot = FindGraveyardSpace();
             mon->isDead = TRUE;
             if (freeSpot >= 0)
@@ -1454,14 +1571,16 @@ static u8 StepKillMon(const struct SoulLinkCommand *cmd)
     if (sKillWork.cursor < PARTY_SIZE + TOTAL_BOXES_COUNT * IN_BOX_COUNT)
         return SOULLINK_CMD_STATUS_PENDING;
     sKillWork.sequence = 0;
-    gSoulLink.routeState[cmd->targetMapSec] = ROUTE_STATE_DEAD_FORFEITED;
+    if (cmd->targetMapSec < NUM_MAPSECS)
+        gSoulLink.routeState[cmd->targetMapSec] = ROUTE_STATE_DEAD_FORFEITED;
     SoulLink_SaveToSaveBlock3();
     if (sKillWork.deferred)
         return SOULLINK_CMD_STATUS_DEFERRED;
-    if (SoulLink_IsPartyWiped())
+    if (sKillWork.partyAffected && SoulLink_IsPartyWiped()
+     && SoulLinkRun_GetStatus() != SOULLINK_RUN_ENDING && SoulLinkRun_GetStatus() != SOULLINK_RUN_ENDED)
     {
         if (!sKillWork.livingBox)
-            SoulLink_EmitEvent(SOULLINK_EVENT_WIPE, cmd->targetMapSec, 0, 0, 0);
+            EmitTrueWipe(cmd->targetMapSec);
 #if !TESTING
         SetMainCallback2(CB2_WhiteOut);
 #endif
@@ -1482,12 +1601,21 @@ void SoulLink_ProcessOverworldCommands(void)
         // Menus/storage/scripts may move Pokemon behind the scan cursor. Retain
         // effects but restart the pending command when safe processing resumes.
         if (sKillWork.partyMoved) CompactPartySlots();
-        ResetKillWork();
+        // Restart the scan after storage movement, retaining the fact that this
+        // same command affected a party member before the interruption.
+        sWipeWork.cursor = 0;
+        sKillWork.cursor = 0;
+        sKillWork.deferred = FALSE;
+        sKillWork.partyMoved = FALSE;
+        sKillWork.livingBox = FALSE;
         return;
     }
 
     if (gSoulLink.cmdTail == gSoulLink.cmdHead)
+    {
+        if (sWipeWork.pending) { StepWipeCheck(); return; }
         SoulLink_SweepRetainedDeadMons();
+    }
 
 #if SOULLINK_DEV_TEST
 #if __has_include("global.h")
@@ -1538,7 +1666,13 @@ void SoulLink_ProcessOverworldCommands(void)
 
         switch (cmd->cmdType)
         {
+        case SOULLINK_CMD_VERIFY_STARTER:
+            cmd->executionStatus = StepVerifyStarter(cmd);
+            if (cmd->executionStatus == SOULLINK_CMD_STATUS_PENDING) return;
+            break;
+
         case SOULLINK_CMD_KILL_MON:
+        case SOULLINK_CMD_KILL_STARTER:
             cmd->executionStatus = StepKillMon(cmd);
             if (cmd->executionStatus == SOULLINK_CMD_STATUS_PENDING)
                 return;
@@ -1599,6 +1733,28 @@ void SoulLink_ProcessOverworldCommands(void)
             }
             break;
 
+        case SOULLINK_CMD_BEGIN_END_RUN:
+        case SOULLINK_CMD_END_RUN:
+            if (gSoulLinkRunProfile.identity.saveVersion == 2
+             && SoulLinkRun_Validate(&gSaveBlock3Ptr->runIntegrity.identity)
+             && memcmp(&gSaveBlock3Ptr->runIntegrity.identity, (const void *)&gSoulLinkRunProfile.identity,
+                       sizeof(struct SoulLinkRunIdentity)) == 0
+             && gSoulLink.transportState == SOULLINK_TRANSPORT_CONNECTED)
+            {
+                // Fence restored living Pokemon before replaying terminal deaths.
+                // ENDING remains resumable if transport drops before END_RUN.
+                if (SoulLinkRun_GetStatus() != SOULLINK_RUN_ENDED)
+                    SoulLinkRun_SetStatus(cmd->cmdType == SOULLINK_CMD_END_RUN ? SOULLINK_RUN_ENDED : SOULLINK_RUN_ENDING);
+                sWipeWork.pending = FALSE;
+                cmd->executionStatus = SOULLINK_CMD_STATUS_SUCCESS;
+#if !TESTING
+                if (cmd->cmdType == SOULLINK_CMD_END_RUN)
+                    SetMainCallback2(CB2_InitSoulLinkMenu);
+#endif
+            }
+            else cmd->executionStatus = SOULLINK_CMD_STATUS_REJECTED;
+            break;
+
         case SOULLINK_CMD_EVENT_FLOOR:
         {
             u32 floor = ((u32)cmd->timestamp << 16) | cmd->paramValue;
@@ -1634,7 +1790,7 @@ void SoulLink_ProcessOverworldCommands(void)
         }
 
         gSoulLink.cmdTail++;
-        if (cmd->cmdType == SOULLINK_CMD_KILL_MON)
+        if (cmd->cmdType == SOULLINK_CMD_KILL_MON || cmd->cmdType == SOULLINK_CMD_KILL_STARTER || cmd->cmdType == SOULLINK_CMD_VERIFY_STARTER)
             return;
     }
 }

@@ -1,4 +1,7 @@
 #include "global.h"
+#include "soullink.h"
+#include "soullink_run.h"
+#include "constants/flags.h"
 #include "battle.h"
 #include "battle_gfx_sfx_util.h"
 #include "berry.h"
@@ -386,12 +389,13 @@ u32 ScriptGiveMonParameterized(u8 side, u8 slot, struct PokemonTemplate *monTemp
     return MON_GIVEN_TO_PARTY;
 }
 
-u32 ScriptGiveMon(enum Species species, u8 level, enum Item item)
+static u32 GiveAcquiredMon(enum Species species, u8 level, enum Item item, u8 acquisition)
 {
     struct Pokemon mon;
     u8 heldItem[2];
 
     CreateRandomMon(&mon, species, level);
+    SetMonData(&mon, MON_DATA_SOULLINK_ACQUISITION, &acquisition);
     if (item)
     {
         heldItem[0] = item;
@@ -399,7 +403,25 @@ u32 ScriptGiveMon(enum Species species, u8 level, enum Item item)
         SetMonData(&mon, MON_DATA_HELD_ITEM, heldItem);
     }
 
-    return GiveScriptedMonToPlayer(&mon, PARTY_SIZE);
+    u32 result = GiveScriptedMonToPlayer(&mon, PARTY_SIZE);
+    if (acquisition == 1 && result != MON_CANT_GIVE)
+    {
+        FlagSet(FLAG_SOULLINK_STARTER_ACQUIRED);
+        if (gSoulLinkRunProfile.identity.saveVersion == 2)
+            SoulLink_EmitEvent(SOULLINK_EVENT_STARTER_ACQUIRED, 255, species, 0, 0);
+    }
+    return result;
+}
+
+u32 ScriptGiveMon(enum Species species, u8 level, enum Item item)
+{
+    return GiveAcquiredMon(species, level, item, 0);
+}
+
+u32 ScriptGiveStarterMon(enum Species species, u8 level, enum Item item)
+{
+    if (!SoulLinkRun_CanProgress() || FlagGet(FLAG_SOULLINK_STARTER_ACQUIRED)) return MON_CANT_GIVE;
+    return GiveAcquiredMon(species, level, item, 1);
 }
 
 #define PARSE_FLAG(n, default_) (flags & (1 << (n))) ? VarGet(ScriptReadHalfword(ctx)) : (default_)

@@ -2117,6 +2117,12 @@ u32 GetBoxMonData3(struct BoxPokemon *boxMon, s32 field, u8 *data)
         case MON_DATA_SPECIES:
             retVal = IsBadEgg(boxMon) ? SPECIES_EGG : GetSubstruct0(boxMon)->species;
             break;
+        case MON_DATA_SOULLINK_LINK_ID:
+            retVal = GetSubstruct0(boxMon)->soulLinkAcquisition == 1 ? 255 : GetSubstruct3(boxMon)->metLocation;
+            break;
+        case MON_DATA_SOULLINK_ACQUISITION:
+            retVal = GetSubstruct0(boxMon)->soulLinkAcquisition;
+            break;
         case MON_DATA_HELD_ITEM:
             retVal = GetSubstruct0(boxMon)->heldItem;
             break;
@@ -2635,6 +2641,9 @@ void SetBoxMonData(struct BoxPokemon *boxMon, s32 field, const void *dataArg)
                 boxMon->hasSpecies = FALSE;
             break;
         }
+        case MON_DATA_SOULLINK_ACQUISITION:
+            SET8(GetSubstruct0(boxMon)->soulLinkAcquisition);
+            break;
         case MON_DATA_HELD_ITEM:
             SET16(GetSubstruct0(boxMon)->heldItem);
             break;
