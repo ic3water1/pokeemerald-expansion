@@ -11,9 +11,11 @@
 #include "load_save.h"
 #include "save.h"
 #include "soullink.h"
+#include "soullink_run.h"
 #include "soullink_menu.h"
 #include "test/test.h"
 #include "constants/maps.h"
+#include "constants/flags.h"
 #include "constants/region_map_sections.h"
 
 // Existing logical regression checks advance the bounded worker over simulated
@@ -45,6 +47,7 @@ TEST("SoulLink: Catch restrictions and first encounter tracking")
 {
     SoulLink_Init();
     SoulLink_NewGame();
+    FlagSet(FLAG_ADVENTURE_STARTED);
     gMapHeader.regionMapSectionId = MAPSEC_ROUTE_101;
 
     // Route 101 should initially be open for catching
@@ -69,6 +72,7 @@ TEST("SoulLink: Failed first encounter forfeits route catch")
 {
     SoulLink_Init();
     SoulLink_NewGame();
+    FlagSet(FLAG_ADVENTURE_STARTED);
     gMapHeader.regionMapSectionId = MAPSEC_ROUTE_102;
 
     EXPECT_EQ(SoulLink_CanCatchOnCurrentMap(), TRUE);
@@ -324,6 +328,7 @@ TEST("SoulLink: Catch validation guard and invalid catches cannot enter party")
 
     SoulLink_Init();
     SoulLink_NewGame();
+    FlagSet(FLAG_ADVENTURE_STARTED);
 
     gMapHeader.regionMapSectionId = MAPSEC_ROUTE_102;
     gSoulLink.routeState[MAPSEC_ROUTE_102] = ROUTE_STATE_DEAD_FORFEITED;
@@ -562,6 +567,17 @@ TEST("SoulLink: Actual in-game flash save and restore via SaveBlock3 sectors")
 
     gSoulLink.unlockedGymStage = 3;
 
+    // Provenance is native encrypted Pokemon data, not a route-state alias.
+    u8 origin = 1, location = MAPSEC_ROUTE_101;
+    ZeroPlayerPartyMons();
+    CreateMon(&gParties[B_TRAINER_PLAYER][0], SPECIES_TORCHIC, 5, 0, OTID_STRUCT_PRESET(0));
+    SetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_MET_LOCATION, &location);
+    SetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_SOULLINK_ACQUISITION, &origin);
+    SetBoxMonAt(0, 0, &gParties[B_TRAINER_PLAYER][0].box);
+    CalculatePlayerPartyCount();
+    SavePlayerParty();
+    FlagSet(FLAG_ADVENTURE_STARTED);
+
     // Detect flash memory in emulator
     CheckForFlashMemory();
     EXPECT_EQ(gFlashMemoryPresent, TRUE);
@@ -578,6 +594,10 @@ TEST("SoulLink: Actual in-game flash save and restore via SaveBlock3 sectors")
     EXPECT_EQ(gSoulLink.unlockedGymStage, 0);
     EXPECT_EQ(gSoulLink.routeState[MAPSEC_ROUTE_101], 0);
 
+    ZeroPlayerPartyMons();
+    ZeroBoxMonAt(0, 0);
+    FlagClear(FLAG_ADVENTURE_STARTED);
+
     // Re-initialize boot state (without NewGame wipe)
     SoulLink_Init();
     EXPECT_EQ(gSoulLink.magic, SOULLINK_MAGIC);
@@ -585,6 +605,13 @@ TEST("SoulLink: Actual in-game flash save and restore via SaveBlock3 sectors")
     // Load game from flash memory (reads all 14 flash sectors)
     u8 loadStatus = LoadGameSave(SAVE_NORMAL);
     EXPECT_EQ(loadStatus, SAVE_STATUS_OK);
+
+    LoadPlayerParty();
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_SOULLINK_ACQUISITION), 1);
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_MET_LOCATION), MAPSEC_ROUTE_101);
+    EXPECT_EQ(GetBoxMonDataAt(0, 0, MON_DATA_SOULLINK_ACQUISITION), 1);
+    EXPECT_EQ(GetBoxMonDataAt(0, 0, MON_DATA_MET_LOCATION), MAPSEC_ROUTE_101);
+    EXPECT(FlagGet(FLAG_ADVENTURE_STARTED));
 
     // Verify all encounters, deaths, and Gym progression were restored from flash
     EXPECT_EQ(gSoulLink.routeState[MAPSEC_ROUTE_101], ROUTE_STATE_ALIVE);
@@ -2104,4 +2131,229 @@ TEST("SoulLink UI: Host migration allows new host to start run and sparse player
     }
     EXPECT_EQ(count, 2);
     EXPECT_EQ(allReady, TRUE);
+}
+
+TEST("SoulLink: pre-ball wild battles leave encounter state and durable events untouched")
+{
+    u16 before;
+    SoulLink_Init();
+    SoulLink_NewGame();
+    FlagClear(FLAG_ADVENTURE_STARTED);
+    gMapHeader.regionMapSectionId = MAPSEC_ROUTE_101;
+    before = gSoulLink.eventHead;
+    EXPECT(!SoulLink_CanCatchOnCurrentMap());
+    SoulLink_OnWildBattleStart();
+    SoulLink_OnWildEncounterFailed();
+    SoulLink_OnWildCatchSuccess(SPECIES_POOCHYENA);
+    EXPECT_EQ(gSoulLink.routeState[MAPSEC_ROUTE_101], ROUTE_STATE_OPEN);
+    EXPECT_EQ(gSoulLink.eventHead, before);
+    // Story progression enables the original unused opportunity. No item-count
+    // check is involved: using the last ball must not turn restrictions off.
+    FlagSet(FLAG_ADVENTURE_STARTED);
+    EXPECT(SoulLink_CanCatchOnCurrentMap());
+    SoulLink_OnWildBattleStart();
+    EXPECT_EQ(gSoulLink.routeState[MAPSEC_ROUTE_101], ROUTE_STATE_ENCOUNTER_ACTIVE);
+    SoulLink_OnWildEncounterFailed();
+    EXPECT_EQ(gSoulLink.routeState[MAPSEC_ROUTE_101], ROUTE_STATE_DEAD_FORFEITED);
+    EXPECT_EQ(gSoulLink.eventHead, before + 1);
+}
+
+TEST("SoulLink: encrypted acquisition provenance survives species and PC storage changes")
+{
+    struct Pokemon mon;
+    struct BoxPokemon stored;
+    u8 origin = 1, location = MAPSEC_ROUTE_101;
+    u16 evolved = SPECIES_COMBUSKEN;
+    CreateMon(&mon, SPECIES_TORCHIC, 5, 0, OTID_STRUCT_PRESET(0));
+    SetMonData(&mon, MON_DATA_MET_LOCATION, &location);
+    EXPECT_EQ(GetMonData(&mon, MON_DATA_SOULLINK_ACQUISITION), 0);
+    SetMonData(&mon, MON_DATA_SOULLINK_ACQUISITION, &origin);
+    SetMonData(&mon, MON_DATA_SPECIES, &evolved);
+    stored = mon.box;
+    EXPECT_EQ(GetBoxMonData(&stored, MON_DATA_SOULLINK_ACQUISITION), origin);
+    EXPECT_EQ(GetBoxMonData(&stored, MON_DATA_MET_LOCATION), MAPSEC_ROUTE_101);
+    EXPECT_EQ(GetBoxMonData(&stored, MON_DATA_SPECIES), SPECIES_COMBUSKEN);
+    EXPECT_EQ(GetBoxMonData(&stored, MON_DATA_SANITY_IS_BAD_EGG), FALSE);
+}
+
+TEST("SoulLink: starter and Route 101 kill commands have disjoint party and PC targets")
+{
+    struct SoulLinkCommand cmd = {.sequenceId = 1, .cmdType = SOULLINK_CMD_KILL_MON, .targetMapSec = MAPSEC_ROUTE_101};
+    u8 origin = 1, location = MAPSEC_ROUTE_101;
+    SoulLink_Init(); SoulLink_NewGame();
+    gPokemonStoragePtr = &gPokemonStorage.block;
+    ResetPokemonStorageSystem(); ZeroPlayerPartyMons();
+    CreateMon(&gParties[B_TRAINER_PLAYER][0], SPECIES_TORCHIC, 5, 0, OTID_STRUCT_PRESET(0));
+    SetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_SOULLINK_ACQUISITION, &origin);
+    SetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_MET_LOCATION, &location);
+    CreateMon(&gParties[B_TRAINER_PLAYER][1], SPECIES_POOCHYENA, 5, 0, OTID_STRUCT_PRESET(0));
+    SetMonData(&gParties[B_TRAINER_PLAYER][1], MON_DATA_MET_LOCATION, &location);
+    SetBoxMonAt(0, 0, &gParties[B_TRAINER_PLAYER][0].box);
+    SetBoxMonAt(0, 1, &gParties[B_TRAINER_PLAYER][1].box);
+    SoulLink_TestSetSafeOverworldOverride(TRUE, TRUE);
+    EXPECT(SoulLink_ReceiveCommand(&cmd)); DrainSoulLinkCommands();
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_SPECIES), SPECIES_TORCHIC);
+    EXPECT_EQ(GetBoxMonDataAt(0, 0, MON_DATA_SPECIES), SPECIES_TORCHIC);
+    EXPECT_EQ(GetBoxMonDataAt(0, 1, MON_DATA_SPECIES), SPECIES_NONE);
+    EXPECT_EQ(SoulLink_GetEncounterIdForMon(&gParties[B_TRAINER_PLAYER][0]), 255);
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_MET_LOCATION), MAPSEC_ROUTE_101);
+    cmd.sequenceId = 2;cmd.cmdType = SOULLINK_CMD_KILL_STARTER;cmd.targetMapSec = 255;
+    EXPECT(SoulLink_ReceiveCommand(&cmd)); DrainSoulLinkCommands();
+    EXPECT_EQ(gSoulLink.cmdQueue[1].executionStatus, SOULLINK_CMD_STATUS_SUCCESS);
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_SPECIES), SPECIES_NONE);
+    EXPECT_EQ(GetBoxMonDataAt(0, 0, MON_DATA_SPECIES), SPECIES_NONE);
+    EXPECT_EQ(GetBoxMonDataAt(SOULLINK_GRAVEYARD_BOX, 2, MON_DATA_SOULLINK_ACQUISITION), 1);
+    EXPECT_EQ(GetBoxMonDataAt(SOULLINK_GRAVEYARD_BOX, 3, MON_DATA_SOULLINK_ACQUISITION), 1);
+    SoulLink_TestSetSafeOverworldOverride(FALSE, FALSE);
+}
+
+TEST("SoulLink: explicit story starter grant tags provenance without consuming Route 101")
+{
+    u8 group = gSaveBlock1Ptr->location.mapGroup, map = gSaveBlock1Ptr->location.mapNum;
+    SoulLink_Init(); SoulLink_NewGame();
+    gSaveBlock1Ptr->location.mapGroup = MAP_GROUP(MAP_ROUTE101);
+    gSaveBlock1Ptr->location.mapNum = MAP_NUM(MAP_ROUTE101);
+    gPokemonStoragePtr = &gPokemonStorage.block;
+    ResetPokemonStorageSystem(); ZeroPlayerPartyMons();
+    FlagClear(FLAG_SOULLINK_STARTER_ACQUIRED);
+    gMapHeader.regionMapSectionId = MAPSEC_ROUTE_101;
+    EXPECT_EQ(ScriptGiveStarterMon(SPECIES_TORCHIC, 5, ITEM_NONE), MON_GIVEN_TO_PARTY);
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_SOULLINK_ACQUISITION), 1);
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_MET_LOCATION), MAPSEC_ROUTE_101);
+    EXPECT_EQ(SoulLink_GetEncounterIdForMon(&gParties[B_TRAINER_PLAYER][0]), 255);
+    EXPECT_EQ(gSoulLink.routeState[MAPSEC_ROUTE_101], ROUTE_STATE_OPEN);
+    EXPECT_EQ(ScriptGiveStarterMon(SPECIES_MUDKIP, 5, ITEM_NONE), MON_CANT_GIVE);
+    FlagClear(FLAG_SOULLINK_STARTER_ACQUIRED);
+    gSaveBlock1Ptr->location.mapGroup = group;gSaveBlock1Ptr->location.mapNum = map;
+}
+
+TEST("SoulLink: bounded wipe check distinguishes living PC, unknown storage and true wipe")
+{
+    struct BoxPokemon survivor;
+    u32 i;
+    SoulLink_Init();SoulLink_NewGame();ZeroPlayerPartyMons();
+    gPokemonStoragePtr = &gPokemonStorage.block;ResetPokemonStorageSystem();
+    CreateBoxMon(&survivor, SPECIES_POOCHYENA, 5, 0, OTID_STRUCT_PRESET(0));
+    SetBoxMonAt(0, 0, &survivor);
+    SoulLink_TestSetSafeOverworldOverride(TRUE, TRUE);
+    SoulLink_QueueWipeCheck();
+    for(i = 0; i < 40; i++) SoulLink_ProcessOverworldCommands();
+    EXPECT(!SoulLink_IsWipeCheckPending());EXPECT_EQ(gSoulLink.eventHead, 0);
+    gPokemonStoragePtr = NULL;SoulLink_QueueWipeCheck();
+    for(i = 0; i < 40; i++) SoulLink_ProcessOverworldCommands();
+    EXPECT(SoulLink_IsWipeCheckPending());EXPECT_EQ(gSoulLink.eventHead, 0);
+    gPokemonStoragePtr = &gPokemonStorage.block;ZeroBoxMonAt(0, 0);
+    for(i = 0; i < 40; i++) SoulLink_ProcessOverworldCommands();
+    EXPECT(!SoulLink_IsWipeCheckPending());EXPECT_EQ(gSoulLink.eventHead, 1);
+    EXPECT_EQ(gSoulLink.eventQueue[0].eventType, SOULLINK_EVENT_WIPE);
+    SoulLink_QueueWipeCheck();
+    for(i = 0; i < 40; i++) SoulLink_ProcessOverworldCommands();
+    EXPECT_EQ(gSoulLink.eventHead, 1);
+    SoulLink_TestSetSafeOverworldOverride(FALSE, FALSE);
+}
+
+TEST("SoulLink: starter receipt restore requires real provenance and never creates a replacement")
+{
+    struct SoulLinkCommand cmd = {.sequenceId = 1, .cmdType = SOULLINK_CMD_VERIFY_STARTER, .targetMapSec = 255};
+    struct Pokemon starter;
+    u8 origin = 1;
+    SoulLink_Init();SoulLink_NewGame();ZeroPlayerPartyMons();
+    gPokemonStoragePtr = &gPokemonStorage.block;ResetPokemonStorageSystem();
+    FlagClear(FLAG_SOULLINK_STARTER_ACQUIRED);
+    SoulLink_TestSetSafeOverworldOverride(TRUE, TRUE);
+    EXPECT(SoulLink_ReceiveCommand(&cmd));DrainSoulLinkCommands();
+    EXPECT_EQ(gSoulLink.cmdQueue[0].executionStatus, SOULLINK_CMD_STATUS_REJECTED);
+    EXPECT(!FlagGet(FLAG_SOULLINK_STARTER_ACQUIRED));
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_SPECIES), SPECIES_NONE);
+    CreateMon(&starter, SPECIES_COMBUSKEN, 16, 0, OTID_STRUCT_PRESET(0));
+    SetMonData(&starter, MON_DATA_SOULLINK_ACQUISITION, &origin);starter.box.isDead = TRUE;
+    SetBoxMonAt(SOULLINK_GRAVEYARD_BOX, IN_BOX_COUNT - 1, &starter.box);
+    cmd.sequenceId = 2;EXPECT(SoulLink_ReceiveCommand(&cmd));DrainSoulLinkCommands();
+    EXPECT_EQ(gSoulLink.cmdQueue[1].executionStatus, SOULLINK_CMD_STATUS_SUCCESS);
+    EXPECT(FlagGet(FLAG_SOULLINK_STARTER_ACQUIRED));
+    EXPECT_EQ(ScriptGiveStarterMon(SPECIES_MUDKIP, 5, ITEM_NONE), MON_CANT_GIVE);
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_SPECIES), SPECIES_NONE);
+    FlagClear(FLAG_SOULLINK_STARTER_ACQUIRED);gPokemonStoragePtr = NULL;
+    cmd.sequenceId = 3;EXPECT(SoulLink_ReceiveCommand(&cmd));DrainSoulLinkCommands();
+    EXPECT_EQ(gSoulLink.cmdQueue[2].executionStatus, SOULLINK_CMD_STATUS_DEFERRED);
+    EXPECT(!FlagGet(FLAG_SOULLINK_STARTER_ACQUIRED));
+    gPokemonStoragePtr = &gPokemonStorage.block;
+    SoulLink_TestSetSafeOverworldOverride(FALSE, FALSE);
+}
+
+TEST("SoulLink: terminal replay kills restored living Pokemon without another wipe")
+{
+    struct SoulLinkCommand cmd = {.sequenceId = 1, .cmdType = SOULLINK_CMD_KILL_MON, .targetMapSec = MAPSEC_ROUTE_101};
+    u8 route = MAPSEC_ROUTE_101;
+    u16 head;
+    SoulLink_Init();SoulLink_NewGame();SoulLinkRun_SetStatus(SOULLINK_RUN_SOLO);
+    gPokemonStoragePtr = &gPokemonStorage.block;ResetPokemonStorageSystem();ZeroPlayerPartyMons();
+    CreateMon(&gParties[B_TRAINER_PLAYER][0], SPECIES_POOCHYENA, 3, 0, OTID_STRUCT_PRESET(0));
+    SetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_MET_LOCATION, &route);
+    SoulLinkRun_SetStatus(SOULLINK_RUN_ENDING);
+    head = gSoulLink.eventHead;
+    SoulLink_TestSetSafeOverworldOverride(TRUE, TRUE);
+    EXPECT(SoulLink_ReceiveCommand(&cmd));DrainSoulLinkCommands();
+    EXPECT_EQ(gSoulLink.cmdQueue[0].executionStatus, SOULLINK_CMD_STATUS_SUCCESS);
+    EXPECT(SoulLink_IsPartyWiped());
+    EXPECT_EQ(GetBoxMonDataAt(SOULLINK_GRAVEYARD_BOX, 0, MON_DATA_SPECIES), SPECIES_POOCHYENA);
+    EXPECT_EQ(gSoulLink.eventHead, head);
+    EXPECT_EQ(SoulLinkRun_GetStatus(), SOULLINK_RUN_ENDING);
+    EXPECT(!SoulLinkRun_CanProgress());
+    SoulLink_TestSetSafeOverworldOverride(FALSE, FALSE);SoulLinkRun_SetStatus(SOULLINK_RUN_SOLO);
+}
+
+TEST("SoulLink: CaptureRecord survives enemy cleanup for party placement and emits once")
+{
+    u16 head;
+    SoulLink_Init(); SoulLink_NewGame(); FlagSet(FLAG_ADVENTURE_STARTED);
+    gMapHeader.regionMapSectionId = MAPSEC_ROUTE_101;
+    SoulLink_OnWildBattleStart();
+    CreateMon(&gParties[B_TRAINER_OPPONENT_A][0], SPECIES_TREECKO, 5, 123, OTID_STRUCT_PLAYER_ID);
+    ZeroPlayerPartyMons();
+    EXPECT_EQ(GiveCapturedMonToPlayer(&gParties[B_TRAINER_OPPONENT_A][0]), MON_GIVEN_TO_PARTY);
+    gBattleResults.caughtMonSpecies = GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_SPECIES);
+    ZeroEnemyPartyMons(); gBattleOutcome = B_OUTCOME_CAUGHT;
+    head = gSoulLink.eventHead;
+    SoulLink_OnWildCaptureComplete();
+    EXPECT_EQ(gSoulLink.eventHead, (u16)(head + 1));
+    EXPECT_EQ(gSoulLink.routeSpecies[MAPSEC_ROUTE_101][0], SPECIES_TREECKO);
+    EXPECT_EQ(GetMonData(&gParties[B_TRAINER_PLAYER][0], MON_DATA_MET_LOCATION), MAPSEC_ROUTE_101);
+    SoulLink_OnWildCaptureComplete();
+    EXPECT_EQ(gSoulLink.eventHead, (u16)(head + 1));
+    ZeroPlayerPartyMons(); ZeroEnemyPartyMons(); gPartiesCount[B_TRAINER_PLAYER] = 0;
+    gBattleResults.caughtMonSpecies = SPECIES_NONE; gBattleOutcome = 0;
+}
+
+TEST("SoulLink: CaptureRecord supports PC placement and canonical location")
+{
+    u32 i;
+    SoulLink_Init(); SoulLink_NewGame(); FlagSet(FLAG_ADVENTURE_STARTED);
+    gMapHeader.regionMapSectionId = MAPSEC_ROUTE_102; SoulLink_OnWildBattleStart();
+    ZeroPlayerPartyMons();
+    for (i = 0; i < PARTY_SIZE; i++)
+        CreateMon(&gParties[B_TRAINER_PLAYER][i], SPECIES_MUDKIP, 5, i, OTID_STRUCT_PLAYER_ID);
+    CpuFill16(0, gPokemonStoragePtr, sizeof(*gPokemonStoragePtr));
+    CreateMon(&gParties[B_TRAINER_OPPONENT_A][0], SPECIES_TREECKO, 5, 123, OTID_STRUCT_PLAYER_ID);
+    EXPECT_EQ(GiveCapturedMonToPlayer(&gParties[B_TRAINER_OPPONENT_A][0]), MON_GIVEN_TO_PC);
+    gBattleResults.caughtMonSpecies = GetBoxMonData(GetBoxedMonPtr(0, 0), MON_DATA_SPECIES);
+    ZeroEnemyPartyMons(); gBattleOutcome = B_OUTCOME_CAUGHT; SoulLink_OnWildCaptureComplete();
+    EXPECT_EQ(gSoulLink.routeSpecies[MAPSEC_ROUTE_102][0], SPECIES_TREECKO);
+    EXPECT_EQ(GetBoxMonData(GetBoxedMonPtr(0, 0), MON_DATA_MET_LOCATION), MAPSEC_ROUTE_102);
+    ZeroPlayerPartyMons(); ZeroEnemyPartyMons(); gPartiesCount[B_TRAINER_PLAYER] = 0;
+    gBattleResults.caughtMonSpecies = SPECIES_NONE; gBattleOutcome = 0;
+}
+
+TEST("SoulLink: CaptureRecord rejects failed catches, absent placement and invalid species")
+{
+    u16 head;
+    SoulLink_Init(); SoulLink_NewGame(); FlagSet(FLAG_ADVENTURE_STARTED);
+    gMapHeader.regionMapSectionId = MAPSEC_ROUTE_101; SoulLink_OnWildBattleStart(); head = gSoulLink.eventHead;
+    gBattleResults.caughtMonSpecies = SPECIES_TREECKO; gBattleOutcome = B_OUTCOME_RAN; SoulLink_OnWildCaptureComplete();
+    gBattleOutcome = B_OUTCOME_CAUGHT; gBattleResults.caughtMonSpecies = SPECIES_NONE; SoulLink_OnWildCaptureComplete();
+    gBattleResults.caughtMonSpecies = NUM_SPECIES; SoulLink_OnWildCaptureComplete();
+    EXPECT_EQ(gSoulLink.eventHead, head);
+    EXPECT_EQ(gSoulLink.routeState[MAPSEC_ROUTE_101], ROUTE_STATE_ENCOUNTER_ACTIVE);
+    ZeroPlayerPartyMons(); ZeroEnemyPartyMons(); gPartiesCount[B_TRAINER_PLAYER] = 0;
+    gBattleResults.caughtMonSpecies = SPECIES_NONE; gBattleOutcome = 0;
 }

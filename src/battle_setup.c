@@ -81,6 +81,7 @@ static void CB2_EndMarowakBattle(void);
 static void TryUpdateGymLeaderRematchFromWild(void);
 static void TryUpdateGymLeaderRematchFromTrainer(void);
 static void CB2_GiveStarter(void);
+static void CB2_StarterAuthorityBoundary(void);
 static void CB2_StartFirstBattle(void);
 static void CB2_EndFirstBattle(void);
 static void SaveChangesToPlayerParty(void);
@@ -713,8 +714,7 @@ static void CB2_EndWildBattle(void)
 
     if (gBattleOutcome == B_OUTCOME_CAUGHT)
     {
-        u16 caughtSpecies = GetMonData(&gParties[B_TRAINER_OPPONENT_A][0], MON_DATA_SPECIES);
-        SoulLink_OnWildCatchSuccess(caughtSpecies);
+        SoulLink_OnWildCaptureComplete();
     }
     else if (!IsPlayerDefeated(gBattleOutcome))
     {
@@ -740,8 +740,7 @@ static void CB2_EndScriptedWildBattle(void)
 
     if (gBattleOutcome == B_OUTCOME_CAUGHT)
     {
-        u16 caughtSpecies = GetMonData(&gParties[B_TRAINER_OPPONENT_A][0], MON_DATA_SPECIES);
-        SoulLink_OnWildCatchSuccess(caughtSpecies);
+        SoulLink_OnWildCaptureComplete();
     }
     else if (!IsPlayerDefeated(gBattleOutcome))
     {
@@ -1040,8 +1039,35 @@ static void CB2_GiveStarter(void)
 
     *GetVarPointer(VAR_STARTER_MON) = gSpecialVar_Result;
     starterMon = GetStarterPokemon(gSpecialVar_Result);
-    ScriptGiveMon(starterMon, 5, ITEM_NONE);
+    // Legacy protected profiles retain their original contract. New-version
+    // profiles and solo games acquire explicit starter provenance at creation.
+    if (gSoulLinkRunProfile.identity.magic && gSoulLinkRunProfile.identity.saveVersion == 1)
+        ScriptGiveMon(starterMon, 5, ITEM_NONE);
+    else if (ScriptGiveStarterMon(starterMon, 5, ITEM_NONE) == MON_CANT_GIVE)
+        return;
     ResetTasks();
+    if (gSoulLinkRunProfile.identity.magic && gSoulLinkRunProfile.identity.saveVersion == 2)
+    {
+        SetMainCallback2(CB2_StarterAuthorityBoundary);
+        return;
+    }
+    PlayBattleBGM();
+    SetMainCallback2(CB2_StartFirstBattle);
+    BattleTransition_Start(B_TRANSITION_BLUR);
+}
+
+bool8 BattleSetup_IsStarterAuthorityBoundary(void)
+{
+    return gMain.callback2 == CB2_StarterAuthorityBoundary;
+}
+
+static void CB2_StarterAuthorityBoundary(void)
+{
+    // The chooser has returned and its tasks are gone. Hold gameplay here while
+    // the acquisition receipt and any concurrent linked deaths are reconciled.
+    SoulLink_ProcessOverworldCommands();
+    if (!BattleSetup_IsStarterAuthorityBoundary() || !SoulLinkRun_CanProgress())
+        return;
     PlayBattleBGM();
     SetMainCallback2(CB2_StartFirstBattle);
     BattleTransition_Start(B_TRANSITION_BLUR);
@@ -1071,7 +1097,10 @@ static void CB2_EndFirstBattle(void)
 {
     Overworld_ClearSavedMusic();
     DowngradeBadPoison();
-    SoulLink_ClearFaintEvents();
+    if (gSoulLinkRunProfile.identity.saveVersion == 2)
+        SoulLink_ProcessFaintedMonsPostBattle();
+    else
+        SoulLink_ClearFaintEvents();
     SetMainCallback2(CB2_ReturnToFieldContinueScriptPlayMapMusic);
 }
 

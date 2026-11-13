@@ -9,7 +9,7 @@
 const volatile struct SoulLinkRunProfile gSoulLinkRunProfile = {
     .marker = "SL_PROFILE_V1",
 };
-const volatile u8 gSoulLinkRunFenceBuild[16] = "SL_RUN_FENCE_V2";
+const volatile u8 gSoulLinkRunFenceBuild[16] = "SL_RUN_FENCE_V3";
 static EWRAM_DATA u8 sRunStatus = SOULLINK_RUN_SOLO;
 STATIC_ASSERT(sizeof(struct SoulLinkRunIdentity) == 44, SoulLinkRunIdentityWireSize);
 STATIC_ASSERT(sizeof(struct SoulLinkRunSave) == 56, SoulLinkRunSaveWireSize);
@@ -42,7 +42,7 @@ static bool8 IsZero(const void *data, u32 size)
 bool8 SoulLinkRun_Validate(const struct SoulLinkRunIdentity *id)
 {
     return id != NULL && id->magic == SOULLINK_RUN_MAGIC
-        && id->saveVersion == SOULLINK_RUN_SAVE_VERSION
+        && (id->saveVersion == SOULLINK_RUN_SAVE_VERSION || id->saveVersion == 2)
         && id->protocolVersion == SOULLINK_RUN_PROTOCOL_VERSION
         && id->playerId < 8 && IsZero(id->reserved, sizeof(id->reserved))
         && !IsZero(id->runId, sizeof(id->runId))
@@ -147,6 +147,7 @@ bool8 SoulLinkRun_CanProgress(void)
     // the mirror byte. Outstanding irreversible events also fence progression.
     if (sRunStatus == SOULLINK_RUN_AUTHORIZED && gSoulLink.runStatus != SOULLINK_RUN_AUTHORIZED)
         SoulLinkRun_Lock();
+    if (SoulLink_IsWipeCheckPending()) return FALSE;
     return sRunStatus == SOULLINK_RUN_SOLO || (sRunStatus == SOULLINK_RUN_AUTHORIZED
         && gSoulLink.eventHead == gSoulLink.eventTail);
 }

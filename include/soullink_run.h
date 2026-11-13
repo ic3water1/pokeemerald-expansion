@@ -9,6 +9,8 @@ enum SoulLinkRunStatus
     SOULLINK_RUN_AUTHORIZED,
     SOULLINK_RUN_FOREIGN,
     SOULLINK_RUN_CORRUPT,
+    SOULLINK_RUN_ENDED,
+    SOULLINK_RUN_ENDING,
 };
 extern const volatile struct SoulLinkRunProfile gSoulLinkRunProfile;
 u32 SoulLinkRun_Crc32(const void *data, u32 size);

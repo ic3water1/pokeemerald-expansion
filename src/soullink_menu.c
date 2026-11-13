@@ -300,6 +300,8 @@ static void AsciiToPokemonString(u8 *dest, const u8 *asciiSrc, u32 maxChars)
             dest[i] = CHAR_PERIOD;
         else if (c == '/')
             dest[i] = CHAR_SLASH;
+        else if (c == '\n')
+            dest[i] = CHAR_NEWLINE;
         else
             dest[i] = CHAR_QUESTION_MARK;
     }
@@ -1032,6 +1034,17 @@ static void RenderLobbyScreen(void)
 
 static void RenderErrorScreen(void)
 {
+    if (SoulLinkRun_GetStatus() == SOULLINK_RUN_ENDED)
+    {
+        RenderHeader(COMPOUND_STRING("RUN ENDED"));
+        FillWindowPixelBuffer(WIN_BODY, PIXEL_FILL(1));
+        AddTextPrinterParameterized(WIN_BODY, FONT_NORMAL,
+            COMPOUND_STRING("This run has ended.\nClose this emulator.\nUse adapter for a new run."),
+            8, 12, TEXT_SKIP_DRAW, NULL);
+        CopyWindowToVram(WIN_BODY, COPYWIN_FULL);
+        RenderFooter(COMPOUND_STRING("RUN LOCKED"));
+        return;
+    }
     RenderHeader(COMPOUND_STRING("{COLOR RED}SOUL LINK ERROR"));
 
     FillWindowPixelBuffer(WIN_BODY, PIXEL_FILL(1));
@@ -1097,6 +1110,16 @@ static void Task_SoulLinkMenu_Main(u8 taskId)
 {
     if (gPaletteFade.active)
         return;
+
+    if (SoulLinkRun_GetStatus() == SOULLINK_RUN_ENDED)
+    {
+        if (sScreen != SOULLINK_SCREEN_ERROR)
+        {
+            sScreen = SOULLINK_SCREEN_ERROR;
+            RenderCurrentScreen();
+        }
+        return;
+    }
 
     // Handle scene exit transition
     if (sScreen == SOULLINK_SCREEN_EXITING)

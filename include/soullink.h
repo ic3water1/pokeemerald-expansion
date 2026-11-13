@@ -101,6 +101,7 @@ enum SoulLinkEventType {
     SOULLINK_EVENT_BADGE = 4,
     SOULLINK_EVENT_WIPE = 5,
     SOULLINK_EVENT_MAP_CHANGE = 6,
+    SOULLINK_EVENT_STARTER_ACQUIRED = 8,
 };
 
 // Incoming Command Types (Lua bridge -> GBA)
@@ -113,6 +114,10 @@ enum SoulLinkCommandType {
     SOULLINK_CMD_CONFIRM_PLAN = 5,
     SOULLINK_CMD_AUTHORIZE_PLAN = 6,
     SOULLINK_CMD_EVENT_FLOOR = 7,
+    SOULLINK_CMD_KILL_STARTER = 8,
+    SOULLINK_CMD_END_RUN = 9,
+    SOULLINK_CMD_VERIFY_STARTER = 10,
+    SOULLINK_CMD_BEGIN_END_RUN = 11,
 };
 
 // Incoming Command Execution Status
@@ -359,6 +364,7 @@ u8 SoulLink_GetTransportState(void);
 // Phase 2: Local Nuzlocke Mechanics
 void SoulLink_OnWildBattleStart(void);
 void SoulLink_OnWildCatchSuccess(u16 species);
+void SoulLink_OnWildCaptureComplete(void);
 void SoulLink_OnWildEncounterFailed(void);
 void SoulLink_RecordFaintEvent(u8 partyIndex);
 void SoulLink_ClearFaintEvents(void);
@@ -385,5 +391,9 @@ void SoulLink_TestSetSessionEpoch(u32 epoch);
 void SoulLink_TestSetSafeOverworldOverride(bool8 enable, bool8 isSafe);
 void SoulLink_TestSetLastExecutedCmdSequenceId(u16 seq);
 #endif
+
+// Bounded post-battle usable-PC validation; pending checks fence progression.
+bool8 SoulLink_IsWipeCheckPending(void);
+void SoulLink_QueueWipeCheck(void);
 
 #endif // GUARD_SOULLINK_H
