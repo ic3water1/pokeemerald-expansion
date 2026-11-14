@@ -1,4 +1,6 @@
 #include "global.h"
+#include "constants/rgb.h"
+#include "soullink_feedback.h"
 #include "battle_pyramid.h"
 #include "bg.h"
 #include "event_data.h"
@@ -354,7 +356,7 @@ enum {
     STATE_PRINT, // For some reason the first state is numerically last.
 };
 
-#define POPUP_OFFSCREEN_Y  ((OW_POPUP_GENERATION == GEN_5) ? 24 : 40)
+#define POPUP_OFFSCREEN_Y  ((OW_POPUP_GENERATION == GEN_5) ? 24 : 56)
 #define POPUP_SLIDE_SPEED  2
 
 #define tState         data[0]
@@ -363,8 +365,12 @@ enum {
 #define tIncomingPopUp data[3]
 #define tPrintTimer    data[4]
 
+bool8 IsMapNamePopupActive(void) { return FuncIsActiveTask(Task_MapNamePopUpWindow); }
+
 void ShowMapNamePopup(void)
 {
+    if (!SoulLinkFeedback_BannerEntry()) return;
+    SoulLinkFeedback_Hide();
     if (FlagGet(FLAG_HIDE_MAP_NAME_POPUP) != TRUE)
     {
         if (!FuncIsActiveTask(Task_MapNamePopUpWindow))
@@ -404,6 +410,8 @@ static void Task_MapNamePopUpWindow(u8 taskId)
     switch (task->tState)
     {
     case STATE_PRINT:
+        if (FlagGet(FLAG_HIDE_MAP_NAME_POPUP)) { HideMapNamePopUpWindow(); return; }
+        if (SoulLinkFeedback_GetCatchStatus() != SL_CATCH_NONE && !SoulLinkFeedback_CanPresent()) return;
         // Wait, then create and print the pop up window
         if (++task->tPrintTimer > 30)
         {
@@ -580,6 +588,14 @@ static void ShowMapNamePopUpWindow(void)
     const u8 *mapDisplayHeaderSource;
     u8 mapNamePopUpWindowId, secondaryPopUpWindowId;
 
+    // Incoming native banners can reuse this task across areas. Recreate only
+    // the window so a 5-row eligible banner cannot leak into a 3-row area.
+    if (OW_POPUP_GENERATION != GEN_5 && GetMapNamePopUpWindowId() != WINDOW_NONE)
+    {
+        ClearStdWindowAndFrame(GetMapNamePopUpWindowId(), FALSE);
+        RemoveMapNamePopUpWindow();
+    }
+
     if (CurrentBattlePyramidLocation() != PYRAMID_LOCATION_NONE)
     {
         if (gMapHeader.mapLayoutId == LAYOUT_BATTLE_FRONTIER_BATTLE_PYRAMID_TOP)
@@ -614,6 +630,7 @@ static void ShowMapNamePopUpWindow(void)
     }
 
     LoadMapNamePopUpWindowBg();
+    SoulLinkFeedback_BannerShown();
 
     mapDisplayHeader[0] = EXT_CTRL_CODE_BEGIN;
     mapDisplayHeader[1] = EXT_CTRL_CODE_BACKGROUND;
@@ -632,7 +649,19 @@ static void ShowMapNamePopUpWindow(void)
     {
         u32 fontId = GetFontIdToFit(withoutPrefixPtr, FONT_NORMAL, -1, 80);
         x = GetStringCenterAlignXOffset(fontId, withoutPrefixPtr, 80);
-        AddTextPrinterParameterized(GetMapNamePopUpWindowId(), fontId, mapDisplayHeader, x, 3, TEXT_SKIP_DRAW, NULL);
+        const u8 titleColors[] = {0, 2, 0};
+        u8 status = SoulLinkFeedback_GetCatchStatus();
+        AddTextPrinterParameterized3(GetMapNamePopUpWindowId(), fontId, x, 3, titleColors, TEXT_SKIP_DRAW, mapDisplayHeader);
+        if (status != SL_CATCH_NONE)
+        {
+            // Theme pixels never use indices 1/3. Reserve only those two entries.
+            const u16 green = RGB(0, 16, 2), red = RGB(25, 1, 1);
+            u8 colors[] = {0, status == SL_CATCH_SYNCING ? 2 : status == SL_CATCH_AVAILABLE ? 1 : 3, 0};
+            const u8 *label = SoulLinkFeedback_StatusText(status);
+            LoadPalette(&green, BG_PLTT_ID(14) + 1, 2);
+            LoadPalette(&red, BG_PLTT_ID(14) + 3, 2);
+            AddTextPrinterParameterized3(GetMapNamePopUpWindowId(), FONT_SMALL, GetStringCenterAlignXOffset(FONT_SMALL,label,80), 21, colors, TEXT_SKIP_DRAW,label);
+        }
         CopyWindowToVram(GetMapNamePopUpWindowId(), COPYWIN_FULL);
     }
 }
@@ -656,13 +685,13 @@ static void DrawMapNamePopUpFrame(u8 bg, u8 x, u8 y, u8 deltaX, u8 deltaY, u8 un
     for (i = 0; i < 1 + TILE_TOP_EDGE_END - TILE_TOP_EDGE_START; i++)
         FillBgTilemapBufferRect(bg, TILE_TOP_EDGE_START + i, i - 1 + x, y - 1, 1, 1, 14);
 
-    // Draw sides
-    FillBgTilemapBufferRect(bg, TILE_LEFT_EDGE_TOP,       x - 1,     y, 1, 1, 14);
-    FillBgTilemapBufferRect(bg, TILE_RIGHT_EDGE_TOP, deltaX + x,     y, 1, 1, 14);
-    FillBgTilemapBufferRect(bg, TILE_LEFT_EDGE_MID,       x - 1, y + 1, 1, 1, 14);
-    FillBgTilemapBufferRect(bg, TILE_RIGHT_EDGE_MID, deltaX + x, y + 1, 1, 1, 14);
-    FillBgTilemapBufferRect(bg, TILE_LEFT_EDGE_BOT,       x - 1, y + 2, 1, 1, 14);
-    FillBgTilemapBufferRect(bg, TILE_RIGHT_EDGE_BOT, deltaX + x, y + 2, 1, 1, 14);
+    // Preserve the native frame while extending its middle for the status line.
+    for (i = 0; i < deltaY; i++)
+    {
+        u16 left = i == 0 ? TILE_LEFT_EDGE_TOP : i == deltaY-1 ? TILE_LEFT_EDGE_BOT : TILE_LEFT_EDGE_MID;
+        FillBgTilemapBufferRect(bg, left, x-1, y+i, 1, 1, 14);
+        FillBgTilemapBufferRect(bg, left+1, x+deltaX, y+i, 1, 1, 14);
+    }
 
     // Draw bottom edge
     for (i = 0; i < 1 + TILE_BOT_EDGE_END - TILE_BOT_EDGE_START; i++)
@@ -718,5 +747,7 @@ static void LoadMapNamePopUpWindowBg(void)
         else
             LoadPalette(sMapPopUp_PaletteTable[popUpThemeId], BG_PLTT_ID(14), sizeof(sMapPopUp_PaletteTable[0]));
         BlitBitmapToWindow(popupWindowId, sMapPopUp_Table[popUpThemeId], 0, 0, 80, 24);
+        if (SoulLinkFeedback_GetCatchStatus() != SL_CATCH_NONE)
+            BlitBitmapRectToWindow(popupWindowId, sMapPopUp_Table[popUpThemeId], 0, 8, 80, 24, 0, 24, 80, 16);
     }
 }

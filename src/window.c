@@ -1,4 +1,5 @@
 #include "global.h"
+#include "soullink_feedback.h"
 #include "window.h"
 #include "malloc.h"
 #include "bg.h"
@@ -284,6 +285,7 @@ void RemoveAllWindowsOnBg(u32 bgId)
 
 void FreeAllWindowBuffers(void)
 {
+    SoulLinkFeedback_WindowsReset();
     int i;
 
     for (i = 0; i < NUM_BACKGROUNDS; ++i)
