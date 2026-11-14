@@ -1,4 +1,5 @@
 #include "global.h"
+#include "soullink_feedback.h"
 #include "overworld.h"
 #include "battle_pyramid.h"
 #include "battle_setup.h"
@@ -670,6 +671,7 @@ static void LoadCurrentMapData(void)
 {
     sLastMapSectionId = gMapHeader.regionMapSectionId;
     gMapHeader = *Overworld_GetMapHeaderByGroupAndId(gSaveBlock1Ptr->location.mapGroup, gSaveBlock1Ptr->location.mapNum);
+    SoulLinkFeedback_EnterArea(gMapHeader.regionMapSectionId);
     gSaveBlock1Ptr->mapLayoutId = gMapHeader.mapLayoutId;
     gMapHeader.mapLayout = GetMapLayout(gMapHeader.mapLayoutId);
 }
@@ -677,6 +679,7 @@ static void LoadCurrentMapData(void)
 static void LoadSaveblockMapHeader(void)
 {
     gMapHeader = *Overworld_GetMapHeaderByGroupAndId(gSaveBlock1Ptr->location.mapGroup, gSaveBlock1Ptr->location.mapNum);
+    SoulLinkFeedback_EnterArea(gMapHeader.regionMapSectionId);
     gMapHeader.mapLayout = GetMapLayout(gSaveBlock1Ptr->mapLayoutId);
 }
 
@@ -1877,6 +1880,7 @@ static void OverworldBasic(void)
     }
     UpdateOverworldWildEncounter();
     SoulLink_ProcessOverworldCommands();
+    SoulLinkFeedback_Update();
 }
 
 // This CB2 is used when starting

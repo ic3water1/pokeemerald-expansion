@@ -1,4 +1,5 @@
 #include "global.h"
+#include "soullink_feedback.h"
 #include "crt0.h"
 #include "malloc.h"
 #include "link.h"
@@ -211,6 +212,7 @@ static void CallCallbacks(void)
 
 void SetMainCallback2(MainCallback callback)
 {
+    if (callback != gMain.callback2) SoulLinkFeedback_Hide();
     gMain.callback2 = callback;
     gMain.state = 0;
 }
