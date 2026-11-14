@@ -50,6 +50,7 @@ typedef uint8_t bool8;
 #define SOULLINK_CAP_RECONNECT_TOKEN   (1 << 3)
 #define SOULLINK_CAP_STABLE_ENCOUNTERS (1 << 4)
 #define SOULLINK_CAP_RUN_FENCE_V2      (1 << 5)
+#define SOULLINK_CAP_FEEDBACK          (1 << 6) // Additive cosmetic command; no mailbox layout change.
 
 // Mailbox status & overflow flags (mailbox.mailboxFlags)
 #define SOULLINK_FLAG_QUEUE_OVERFLOW           (1 << 0) // Non-critical event dropped
@@ -118,6 +119,7 @@ enum SoulLinkCommandType {
     SOULLINK_CMD_END_RUN = 9,
     SOULLINK_CMD_VERIFY_STARTER = 10,
     SOULLINK_CMD_BEGIN_END_RUN = 11,
+    SOULLINK_CMD_NOTICE = 12, // Cosmetic only; never an event acknowledgment.
 };
 
 // Incoming Command Execution Status

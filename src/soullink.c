@@ -1,4 +1,5 @@
 #include "soullink.h"
+#include "soullink_feedback.h"
 #include "soullink_run.h"
 #include "soullink_menu.h"
 
@@ -148,6 +149,7 @@ static const u8 sGymLevelCaps[] = {
  */
 void SoulLink_Init(void)
 {
+    SoulLinkFeedback_Init();
     memset(&sWipeWork, 0, sizeof(sWipeWork));
     ResetKillWork();
     u32 i;
@@ -164,7 +166,7 @@ void SoulLink_Init(void)
                            | SOULLINK_CAP_LOBBY_MANAGEMENT
                            | SOULLINK_CAP_RECONNECT_TOKEN
                            | SOULLINK_CAP_STABLE_ENCOUNTERS
-                           | SOULLINK_CAP_RUN_FENCE_V2;
+                           | SOULLINK_CAP_RUN_FENCE_V2 | SOULLINK_CAP_FEEDBACK;
 
     // Generate unique non-zero session epoch to isolate restarts
     epoch = gSoulLink.sessionEpoch + 1;
@@ -1666,6 +1668,11 @@ void SoulLink_ProcessOverworldCommands(void)
 
         switch (cmd->cmdType)
         {
+        case SOULLINK_CMD_NOTICE:
+            SoulLinkFeedback_Enqueue(cmd->paramPrimaryType, cmd->sourcePlayerId, cmd->targetMapSec, cmd->paramValue, cmd->timestamp);
+            cmd->executionStatus = SOULLINK_CMD_STATUS_SUCCESS;
+            break;
+
         case SOULLINK_CMD_VERIFY_STARTER:
             cmd->executionStatus = StepVerifyStarter(cmd);
             if (cmd->executionStatus == SOULLINK_CMD_STATUS_PENDING) return;
